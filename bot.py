@@ -573,7 +573,53 @@ def check_ads(urls, info, need_photo, rents, limit=None):
     return checked
 
 
+import unicodedata
+
+BIG_DISTRICTS = ["Stare Miasto", "Śródmieście", "Krzyki", "Fabryczna", "Psie Pole"]
+
+
+def norm(text):
+    t = unicodedata.normalize("NFD", (text or "").lower())
+    return "".join(c for c in t if unicodedata.category(c) != "Mn").replace("ł", "l")
+
+
+def user_matches(u, o, rooms):
+    """Подходит ли квартира под фильтры человека (та же логика, что в worker.js)."""
+    if rooms not in u["rooms"]:
+        return False
+    pay = o.get("total") or o.get("price_num")
+    if not pay:
+        return False
+    if u.get("minPrice") and pay < u["minPrice"]:
+        return False
+    if u.get("maxPrice") and pay > u["maxPrice"]:
+        return False
+    if (u.get("minArea") or u.get("maxArea")) and not o.get("area_num"):
+        return False
+    if u.get("minArea") and o["area_num"] < u["minArea"]:
+        return False
+    if u.get("maxArea") and o["area_num"] > u["maxArea"]:
+        return False
+    if u.get("hideNoPets") and o.get("pets") == "no":
+        return False
+    if u.get("districts"):
+        hay = norm(f"{o.get('district_short', '')} {o.get('title', '')}")
+        if not any(norm(d) in hay for d in u["districts"]):
+            return False
+    return True
+
+
 MAX_PER_RUN = 3   # если новых больше — присылаем 3 лучших и кнопку «Посмотреть ещё»
+
+
+def districts_map(offers):
+    """Микрорайоны, которые сейчас встречаются в объявлениях: {«Krzyki»: [«Huby», «Gaj», …]}."""
+    out = {b: set() for b in BIG_DISTRICTS}
+    for o in offers:
+        parts = [p.strip() for p in (o.get("district_short") or "").split(",")]
+        if len(parts) == 2 and parts[1] in out and parts[0] not in BIG_DISTRICTS:
+            out[parts[1]].add(parts[0])
+    return {b: sorted(v) for b, v in out.items()}
 
 
 def main():
@@ -592,7 +638,7 @@ def main():
     fetched = []   # (key, rooms, [offers])
     for rooms in [1, 2, 3, 4]:
         wanting = [u for u in users if rooms in u["rooms"]]
-        max_price = max([SNAPSHOT_PRICE] + [u["maxPrice"] for u in wanting])
+        max_price = max([SNAPSHOT_PRICE] + [u.get("maxPrice") or 20000 for u in wanting])
         for name, getter in SOURCES.items():
             key = f"{name}:{rooms}"
             try:
@@ -664,10 +710,7 @@ def main():
                     continue
                 sigs.add(o["sig"])
                 for u in users:
-                    if u.get("hideNoPets") and o.get("pets") == "no":
-                        continue
-                    pay = o.get("total") or o.get("price_num")
-                    if rooms in u["rooms"] and pay and pay <= u["maxPrice"]:
+                    if user_matches(u, o, rooms):
                         to_send[u["id"]].append(o)
         seen[key] = (seen.get(key, []) + [o["id"] for o in new])[-500:]
         print(f"{key}: новых {len(new)}")
@@ -699,8 +742,8 @@ def main():
                     snap_sigs.add(lst[i]["sig"])
                     snapshot.append(lst[i])
     with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
-        json.dump({"updated": datetime.now(WARSAW).isoformat(), "avg": avg, "offers": snapshot},
-                  f, ensure_ascii=False)
+        json.dump({"updated": datetime.now(WARSAW).isoformat(), "avg": avg,
+                   "districts": districts_map(snapshot), "offers": snapshot}, f, ensure_ascii=False)
 
 
 if __name__ == "__main__":
