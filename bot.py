@@ -46,7 +46,8 @@ def otodom_url(rooms, max_price):
 SEEN_FILE = "seen.json"
 SNAPSHOT_FILE = "latest.json"   # все актуальные объявления — бот берёт их для «Показать сейчас»
 SNAPSHOT_PRICE = 6000           # для снимка берём квартиры до этой цены
-PETS_FILE = "pets.json"         # что бот уже узнал про животных: {ссылка: yes/no/unknown}
+INFO_FILE = "adinfo.json"       # что бот узнал, открыв объявление: {ссылка: {pets, photo}}
+OLD_PETS_FILE = "pets.json"
 PETS_PER_RUN = 40               # сколько старых объявлений проверять за раз (новые — всегда)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -161,8 +162,13 @@ def send_more(chat_id, count):
 
 def short_district(text):
     parts = [p.strip() for p in re.split(r"[,]", text or "") if p.strip()]
-    parts = [p for p in parts if p.lower() not in ("wrocław", "wroclaw", "dolnośląskie", "dolnoslaskie")]
-    return ", ".join(parts[:2])
+    out = []
+    for p in parts:
+        if p.lower() in ("wrocław", "wroclaw", "dolnośląskie", "dolnoslaskie"):
+            continue
+        if p.lower() not in [x.lower() for x in out]:   # «Krzyki, Krzyki» → «Krzyki»
+            out.append(p)
+    return ", ".join(out[:2])
 
 
 def enrich(o, rooms, source):
@@ -189,10 +195,32 @@ def price_number(text):
     return int(digits) if digits else None
 
 
+def olx_page_photos(page_html):
+    """OLX прячет фото всех объявлений в данных страницы — достаём их оттуда сразу."""
+    photos = {}
+    m = re.search(r"window\.__PRERENDERED_STATE__\s*=\s*(\".*?\");\s*(?:window|</script>)", page_html, re.S)
+    if not m:
+        return photos
+    try:
+        state = json.loads(json.loads(m.group(1)))
+        ads = (((state.get("listing") or {}).get("listing") or {}).get("ads")) or []
+        for ad in ads:
+            pics = ad.get("photos") or []
+            if ad.get("url") and pics:
+                first = pics[0] if isinstance(pics[0], str) else (pics[0].get("link") or "")
+                first = first.replace("{width}", "1000").replace("{height}", "750")
+                if first:
+                    photos[ad["url"].split("?")[0].split("#")[0]] = first
+    except (ValueError, AttributeError, TypeError) as e:
+        print(f"OLX: не прочитались фото из данных страницы — {e}")
+    return photos
+
+
 def get_olx(rooms, max_price):
     r = requests.get(olx_url(rooms, max_price), headers=HEADERS, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
+    page_photos = olx_page_photos(r.text)
     offers = []
     for card in soup.select('div[data-cy="l-card"]'):
         ad_id = card.get("id")
@@ -229,7 +257,11 @@ def get_olx(rooms, max_price):
                     break
             if not photo and img.get("srcset"):
                 photo = img["srcset"].split(",")[-1].strip().split(" ")[0]
-            photo = re.sub(r";s=\d+x\d+", ";s=1000x750", photo)  # фото покрупнее
+            if "no_thumbnail" in photo or "placeholder" in photo:
+                photo = ""
+        if not photo:
+            photo = page_photos.get(url, "")
+        photo = re.sub(r";s=\d+x\d+", ";s=1000x750", photo)  # фото покрупнее
         # свежее = опубликовано сегодня и не «поднято» (Odświeżono)
         fresh = ("Dzisiaj" in loc) and ("Odświeżono" not in loc) and not featured
         offers.append({"id": ad_id, "title": title, "price": price, "loc": loc,
@@ -384,11 +416,13 @@ PETS_YES = [
 ]
 
 
-def ad_text(url):
-    """Текст объявления: описание + параметры."""
+def ad_page(url):
+    """Открывает объявление: возвращает (текст описания, главное фото)."""
     r = requests.get(url, headers=HEADERS, timeout=20)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
+    og = soup.find("meta", property="og:image")
+    photo = og.get("content", "") if og else ""
     parts = []
     for sel in ['[data-cy="ad_description"]', '[data-testid="ad-parameters-container"]',
                 '[data-cy="adPageAdDescription"]', '[data-testid="ad.top-information.table"]',
@@ -406,15 +440,10 @@ def ad_text(url):
             pass
     if not any(p.strip() for p in parts):
         parts.append(soup.get_text(" ", strip=True))
-    return " ".join(parts).lower()
+    return " ".join(parts).lower(), photo
 
 
-def detect_pets(url):
-    try:
-        text = ad_text(url)
-    except Exception as e:
-        print(f"Животные: не открылось {url} — {e}")
-        return None
+def pets_from_text(text):
     if any(re.search(p, text) for p in PETS_NO):
         return "no"
     if any(re.search(p, text) for p in PETS_YES):
@@ -422,16 +451,20 @@ def detect_pets(url):
     return "unknown"
 
 
-def check_pets(urls, pets, limit=None):
+def check_ads(urls, info, need_photo, limit=None):
+    """Открывает объявления, которых ещё нет в кэше: узнаёт животных и фото."""
     checked = 0
     for url in urls:
-        if url in pets:
+        known = info.get(url)
+        if known and (known.get("photo") or url not in need_photo):
             continue
         if limit is not None and checked >= limit:
             break
-        result = detect_pets(url)
-        if result:
-            pets[url] = result
+        try:
+            text, photo = ad_page(url)
+            info[url] = {"pets": pets_from_text(text), "photo": photo or "none"}
+        except Exception as e:
+            print(f"Не открылось {url} — {e}")
         checked += 1
         time.sleep(0.7)   # не торопимся, чтобы сайты не блокировали
     return checked
@@ -479,24 +512,35 @@ def main():
             if o.get("ppm") and rooms in avg:
                 o["deal"] = round((o["ppm"] / avg[rooms] - 1) * 100)
 
-    # 3) Животные: сначала все новые объявления, потом понемногу старые
-    pets = {}
-    if os.path.exists(PETS_FILE):
-        with open(PETS_FILE, encoding="utf-8") as f:
-            pets = json.load(f)
+    # 3) Открываем объявления: животные + фото. Сначала все новые, потом понемногу старые
+    info = {}
+    if os.path.exists(INFO_FILE):
+        with open(INFO_FILE, encoding="utf-8") as f:
+            info = json.load(f)
+    elif os.path.exists(OLD_PETS_FILE):   # переносим то, что узнали раньше (без фото)
+        with open(OLD_PETS_FILE, encoding="utf-8") as f:
+            info = {u: {"pets": v, "photo": ""} for u, v in json.load(f).items()}
     new_urls, other_urls = [], []
     for key, rooms, offers in fetched:
         old = set(seen.get(key, []))
         for o in offers:
             (new_urls if (key in seen and o["id"] not in old) else other_urls).append(o["url"])
-    n1 = check_pets(dict.fromkeys(new_urls), pets)
-    n2 = check_pets(dict.fromkeys(other_urls), pets, limit=PETS_PER_RUN)
-    print(f"Животные: проверено новых {n1}, старых {n2}, всего известно {len(pets)}")
+    # объявления без фото проверяем в первую очередь
+    need_photo = {o["url"] for _, _, offs in fetched for o in offs if not o.get("photo")}
+    other_urls.sort(key=lambda u: 0 if u in need_photo else 1)
+    n1 = check_ads(dict.fromkeys(new_urls), info, need_photo)
+    # все объявления без фото — сразу, остальные — понемногу
+    n2 = check_ads(dict.fromkeys(u for u in other_urls if u in need_photo), info, need_photo, limit=200)
+    n2 += check_ads(dict.fromkeys(other_urls), info, need_photo, limit=PETS_PER_RUN)
+    print(f"Объявления: открыто новых {n1}, старых {n2}, всего известно {len(info)}")
     for _, _, offers in fetched:
         for o in offers:
-            o["pets"] = pets.get(o["url"], "unknown")
-    with open(PETS_FILE, "w", encoding="utf-8") as f:
-        json.dump(dict(list(pets.items())[-3000:]), f, ensure_ascii=False)
+            known = info.get(o["url"]) or {}
+            o["pets"] = known.get("pets", "unknown")
+            if not o.get("photo") and known.get("photo") not in (None, "", "none"):
+                o["photo"] = known["photo"]
+    with open(INFO_FILE, "w", encoding="utf-8") as f:
+        json.dump(dict(list(info.items())[-3000:]), f, ensure_ascii=False)
 
     # 4) Новые объявления → подписчикам по их фильтрам
     to_send = {u["id"]: [] for u in users}
