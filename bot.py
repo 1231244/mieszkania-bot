@@ -118,9 +118,8 @@ def card(o, is_new):
             lines.append(f"🔴 Дороже среднего на {deal}%")
         else:
             lines.append("⚪ Средняя цена по рынку")
-    place = " · ".join(x for x in [o.get("street"), o.get("district_short")] if x)
-    if place:
-        lines.append(f"📍 {e(place)}")
+    if o.get("district_short"):
+        lines.append(f"📍 {e(o['district_short'])}")
     lines.append(PETS_TEXT.get(o.get("pets"), PETS_TEXT["unknown"]))
     lines += ["", f"<i>{e(o['title'][:90])}</i>", ""]
     tail = f"👤 Частник · {o['source']}"
@@ -132,7 +131,7 @@ def card(o, is_new):
 
 def card_buttons(o):
     row = [{"text": "Открыть ↗", "url": o["url"]}, {"text": "⭐", "callback_data": "fav"}]
-    where = o.get("street") or o.get("district_short")
+    where = o.get("district_short")
     if where:
         q = requests.utils.quote(f"{where}, Wrocław")
         row.append({"text": "🗺 Карта", "url": f"https://www.google.com/maps/search/?api=1&query={q}"})
