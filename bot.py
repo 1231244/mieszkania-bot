@@ -118,8 +118,9 @@ def card(o, is_new):
             lines.append(f"🔴 Дороже среднего на {deal}%")
         else:
             lines.append("⚪ Средняя цена по рынку")
-    if o.get("district_short"):
-        lines.append(f"📍 {e(o['district_short'])}")
+    place = " · ".join(x for x in [o.get("street"), o.get("district_short")] if x)
+    if place:
+        lines.append(f"📍 {e(place)}")
     lines.append(PETS_TEXT.get(o.get("pets"), PETS_TEXT["unknown"]))
     lines += ["", f"<i>{e(o['title'][:90])}</i>", ""]
     tail = f"👤 Частник · {o['source']}"
@@ -131,8 +132,9 @@ def card(o, is_new):
 
 def card_buttons(o):
     row = [{"text": "Открыть ↗", "url": o["url"]}, {"text": "⭐", "callback_data": "fav"}]
-    if o.get("district_short"):
-        q = requests.utils.quote(f"{o['district_short']}, Wrocław")
+    where = o.get("street") or o.get("district_short")
+    if where:
+        q = requests.utils.quote(f"{where}, Wrocław")
         row.append({"text": "🗺 Карта", "url": f"https://www.google.com/maps/search/?api=1&query={q}"})
     return {"inline_keyboard": [row]}
 
@@ -169,6 +171,10 @@ def enrich(o, rooms, source):
     if o["area_num"] and o.get("price_num"):
         o["ppm"] = round(o["price_num"] / o["area_num"])
     o["district_short"] = short_district(o.get("district"))
+    if not o.get("street"):
+        m = re.search(r"\bul\.?\s+([A-ZŁŚŻŹĆÓ][\wąćęłńóśźż\-]+(?:\s+[A-ZŁŚŻŹĆÓ][\wąćęłńóśźż\-]+)?)(?:\s+(\d+[a-zA-Z]?))?",
+                      o.get("title") or "")
+        o["street"] = " ".join(x for x in m.groups() if x) if m else ""
     if o.get("price_num") and o["area_num"]:
         o["sig"] = f"{rooms}|{o['price_num']}|{round(o['area_num'])}|{o['district_short'].lower()}"
     else:
@@ -282,6 +288,14 @@ def otodom_fresh(ad):
         return True
 
 
+def otodom_street(ad):
+    street = (((ad.get("location") or {}).get("address") or {}).get("street") or {})
+    name = street.get("name") or ""
+    if not name:
+        return ""
+    return f"{name} {street.get('number') or ''}".strip()
+
+
 def otodom_photo(ad):
     imgs = ad.get("images") or []
     if imgs and isinstance(imgs[0], dict):
@@ -335,6 +349,7 @@ def get_otodom(rooms, max_price):
             "loc": otodom_location(ad),
             "url": f"https://www.otodom.pl/pl/oferta/{ad['slug']}",
             "district": otodom_location(ad),
+            "street": otodom_street(ad),
             "area": f"{ad['areaInSquareMeters']} m²" if ad.get("areaInSquareMeters") else "",
             "when": otodom_when(ad),
             "posted_at": otodom_posted(ad),
@@ -496,7 +511,7 @@ def main():
                 for u in users:
                     if u.get("hideNoPets") and o.get("pets") == "no":
                         continue
-                    if rooms in u["rooms"] and (o.get("price_num") is None or o["price_num"] <= u["maxPrice"]):
+                    if rooms in u["rooms"] and o.get("price_num") and o["price_num"] <= u["maxPrice"]:
                         to_send[u["id"]].append(o)
         seen[key] = (seen.get(key, []) + [o["id"] for o in new])[-500:]
         print(f"{key}: новых {len(new)}")
@@ -522,7 +537,8 @@ def main():
         lists = [offs for k, r, offs in fetched if r == rooms]
         for i in range(max((len(x) for x in lists), default=0)):
             for lst in lists:
-                if i < len(lst) and lst[i]["sig"] not in snap_sigs:
+                if i < len(lst) and lst[i]["sig"] not in snap_sigs and lst[i].get("price_num") \
+                        and (minutes_ago(lst[i].get("posted_at")) or 0) < 60 * 24 * 60:
                     snap_sigs.add(lst[i]["sig"])
                     snapshot.append(lst[i])
     with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
