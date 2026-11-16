@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# не запускать новую проверку, пока не закончилась прошлая
+concurrency:
+  group: check-apartments
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
