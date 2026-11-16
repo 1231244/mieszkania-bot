@@ -1,7 +1,10 @@
 # Бот: присылает новые объявления квартир с OLX и Otodom в Telegram
+import html
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -12,7 +15,10 @@ CHAT_ID = os.environ["CHAT_ID"]
 # ===== ФИЛЬТРЫ (меняй здесь) =====
 MAX_PRICE = 3200   # максимальная цена, zł
 ROOMS = 2          # количество комнат: 1, 2, 3 или 4
+QUIET_FROM = 23    # тихие часы: с 23:00...
+QUIET_TO = 7       # ...до 7:00 — сообщения без звука
 # =================================
+WARSAW = ZoneInfo("Europe/Warsaw")
 
 ROOMS_OLX = {1: "one", 2: "two", 3: "three", 4: "four"}[ROOMS]
 ROOMS_OTODOM = {1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR"}[ROOMS]
@@ -38,14 +44,46 @@ HEADERS = {
 }
 
 
-def send(text):
-    r = requests.post(
-        f"https://api.telegram.org/bot{TOKEN.strip()}/sendMessage",
-        data={"chat_id": CHAT_ID.strip(), "text": text},
-        timeout=20,
-    )
+API = f"https://api.telegram.org/bot{TOKEN.strip()}"
+
+
+def is_quiet():
+    h = datetime.now(WARSAW).hour
+    return h >= QUIET_FROM or h < QUIET_TO
+
+
+def tg(method, payload):
+    payload = {"chat_id": CHAT_ID.strip(), "disable_notification": is_quiet(), **payload}
+    r = requests.post(f"{API}/{method}", json=payload, timeout=30)
     if not r.ok:
-        print(f"Telegram НЕ отправил сообщение: {r.status_code} {r.text}")
+        print(f"Telegram НЕ отправил ({method}): {r.status_code} {r.text}")
+    return r.ok
+
+
+def send(text):
+    tg("sendMessage", {"text": text, "parse_mode": "HTML"})
+
+
+def send_offer(o, source):
+    e = html.escape
+    lines = [f"🏠 <b>{e(o['title'])}</b>", "", f"💰 <b>{e(o['price'])}</b>"]
+    if o.get("area"):
+        lines.append(f"📐 {e(o['area'])}")
+    if o.get("district"):
+        lines.append(f"📍 {e(o['district'])}")
+    if o.get("when"):
+        lines.append(f"🆕 {e(o['when'])}")
+    lines.append(f"🔎 {source}")
+    caption = "\n".join(lines)
+    buttons = {"inline_keyboard": [[{"text": f"Открыть на {source} ↗", "url": o["url"]}]]}
+
+    if o.get("photo"):
+        ok = tg("sendPhoto", {"photo": o["photo"], "caption": caption,
+                              "parse_mode": "HTML", "reply_markup": buttons})
+        if ok:
+            return
+    tg("sendMessage", {"text": caption, "parse_mode": "HTML", "reply_markup": buttons,
+                       "disable_web_page_preview": True})
 
 
 # ---------- OLX ----------
@@ -70,10 +108,26 @@ def get_olx():
         loc_el = card.find(attrs={"data-testid": "location-date"})
         loc = loc_el.get_text(" ", strip=True) if loc_el else ""
         featured = card.find(attrs={"data-testid": "adCard-featured"}) is not None
+        # район и время: «Wrocław, Krzyki - Dzisiaj o 12:44»
+        district, _, when = loc.partition(" - ")
+        m = re.search(r"(\d+(?:[.,]\d+)?)\s*m²", card.get_text(" "))
+        area = f"{m.group(1)} m²" if m else ""
+        photo = ""
+        img = card.find("img")
+        if img:
+            for attr in ("src", "data-src"):
+                v = img.get(attr) or ""
+                if v.startswith("http"):
+                    photo = v
+                    break
+            if not photo and img.get("srcset"):
+                photo = img["srcset"].split(",")[-1].strip().split(" ")[0]
+            photo = re.sub(r";s=\d+x\d+", ";s=1000x750", photo)  # фото покрупнее
         # свежее = опубликовано сегодня и не «поднято» (Odświeżono)
         fresh = ("Dzisiaj" in loc) and ("Odświeżono" not in loc) and not featured
         offers.append({"id": ad_id, "title": title, "price": price, "loc": loc,
-                       "url": url, "fresh": fresh})
+                       "district": district, "when": when, "area": area,
+                       "photo": photo, "url": url, "fresh": fresh})
     return offers
 
 
@@ -126,6 +180,28 @@ def otodom_fresh(ad):
         return True
 
 
+def otodom_photo(ad):
+    imgs = ad.get("images") or []
+    if imgs and isinstance(imgs[0], dict):
+        for key in ("large", "medium", "small"):
+            if imgs[0].get(key):
+                return imgs[0][key]
+    return ""
+
+
+def otodom_when(ad):
+    created = ad.get("createdAtFirst") or ad.get("dateCreatedFirst") or ad.get("dateCreated")
+    if not created:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return "Опубликовано " + dt.astimezone(WARSAW).strftime("%d.%m в %H:%M")
+    except ValueError:
+        return ""
+
+
 def get_otodom():
     r = requests.get(OTODOM_URL, headers=HEADERS, timeout=30)
     r.raise_for_status()
@@ -142,6 +218,10 @@ def get_otodom():
             "price": otodom_price(ad),
             "loc": otodom_location(ad),
             "url": f"https://www.otodom.pl/pl/oferta/{ad['slug']}",
+            "district": otodom_location(ad),
+            "area": f"{ad['areaInSquareMeters']} m²" if ad.get("areaInSquareMeters") else "",
+            "when": otodom_when(ad),
+            "photo": otodom_photo(ad),
             "fresh": otodom_fresh(ad),
         })
     return offers
@@ -152,9 +232,11 @@ SOURCES = {"OLX": get_olx, "Otodom": get_otodom}
 
 # ---------- ГЛАВНОЕ ----------
 def main():
-    # При ручном запуске (Run workflow) — тестовое сообщение
-    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
-        send("🔔 Тест: бот работает и проверяет OLX + Otodom")
+    # При ручном запуске (Run workflow) — тест + пример оформления
+    manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    if manual:
+        send("🔔 <b>Тест:</b> бот работает и проверяет OLX + Otodom")
+    example_sent = False
 
     seen = {}
     if os.path.exists(SEEN_FILE):
@@ -173,6 +255,11 @@ def main():
             print(f"{name}: объявлений не найдено (сайт изменился или заблокировал запрос)")
             continue
 
+        if manual and not example_sent:
+            send("👀 <b>Пример</b> того, как выглядят объявления:")
+            send_offer(offers[0], name)
+            example_sent = True
+
         first_run = name not in seen
         old = seen.get(name, [])
         new = [o for o in offers if o["id"] not in set(old)]
@@ -182,7 +269,7 @@ def main():
                  "Буду присылать только новые.")
         else:
             for o in reversed([o for o in new if o.get("fresh", True)]):
-                send(f"🏠 [{name}] {o['title']}\n💰 {o['price']}\n📍 {o['loc']}\n{o['url']}")
+                send_offer(o, name)
 
         seen[name] = (old + [o["id"] for o in new])[-500:]
         print(f"{name}: найдено {len(offers)}, новых {len(new)}")
