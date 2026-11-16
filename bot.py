@@ -42,6 +42,8 @@ def otodom_url(rooms, max_price):
 
 
 SEEN_FILE = "seen.json"
+SNAPSHOT_FILE = "latest.json"   # все актуальные объявления — бот берёт их для «Показать сейчас»
+SNAPSHOT_PRICE = 6000           # для снимка берём квартиры до этой цены
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -137,7 +139,7 @@ def get_olx(rooms, max_price):
         offers.append({"id": ad_id, "title": title, "price": price, "loc": loc,
                        "price_num": price_number(price),
                        "district": district, "when": when, "area": area,
-                       "photo": photo, "url": url, "fresh": fresh})
+                       "photo": photo, "url": url, "fresh": fresh, "featured": featured})
     return offers
 
 
@@ -251,8 +253,6 @@ def get_users():
 def main():
     users = get_users()
     print(f"Подписчиков: {len(users)}")
-    if not users:
-        return
 
     seen = {}
     if os.path.exists(SEEN_FILE):
@@ -262,12 +262,13 @@ def main():
             seen = {}
 
     already_sent = set()   # чтобы одно объявление не пришло человеку дважды
+    snapshot = []          # актуальные объявления для кнопки «Показать сейчас»
 
-    # Для каждого количества комнат — одна проверка с максимальной ценой среди подписчиков
-    all_rooms = sorted({r for u in users for r in u["rooms"]})
-    for rooms in all_rooms:
+    # Проверяем все варианты комнат 1–4: нужно и для рассылки, и для снимка
+    for rooms in [1, 2, 3, 4]:
         wanting = [u for u in users if rooms in u["rooms"]]
-        max_price = max(u["maxPrice"] for u in wanting)
+        max_price = max([SNAPSHOT_PRICE] + [u["maxPrice"] for u in wanting])
+        per_source = []
 
         for name, getter in SOURCES.items():
             key = f"{name}:{rooms}"
@@ -279,6 +280,9 @@ def main():
             if not offers:
                 print(f"{key}: объявлений не найдено")
                 continue
+
+            per_source.append([dict(o, rooms=rooms, source=name) for o in offers
+                               if not o.get("featured")])
 
             first_run = key not in seen
             old = set(seen.get(key, []))
@@ -296,8 +300,17 @@ def main():
             seen[key] = (seen.get(key, []) + [o["id"] for o in new])[-500:]
             print(f"{key}: найдено {len(offers)}, новых {len(new)}")
 
+        # перемешиваем OLX и Otodom по очереди: свежие сверху у обоих
+        for i in range(max((len(x) for x in per_source), default=0)):
+            for lst in per_source:
+                if i < len(lst):
+                    snapshot.append(lst[i])
+
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(seen, f)
+    with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+        json.dump({"updated": datetime.now(WARSAW).isoformat(), "offers": snapshot},
+                  f, ensure_ascii=False)
 
 
 if __name__ == "__main__":
