@@ -1,6 +1,7 @@
 # Бот: присылает новые объявления квартир с OLX и Otodom в Telegram
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import requests
 from bs4 import BeautifulSoup
@@ -68,7 +69,11 @@ def get_olx():
         price = price_el.get_text(" ", strip=True) if price_el else "?"
         loc_el = card.find(attrs={"data-testid": "location-date"})
         loc = loc_el.get_text(" ", strip=True) if loc_el else ""
-        offers.append({"id": ad_id, "title": title, "price": price, "loc": loc, "url": url})
+        featured = card.find(attrs={"data-testid": "adCard-featured"}) is not None
+        # свежее = опубликовано сегодня и не «поднято» (Odświeżono)
+        fresh = ("Dzisiaj" in loc) and ("Odświeżono" not in loc) and not featured
+        offers.append({"id": ad_id, "title": title, "price": price, "loc": loc,
+                       "url": url, "fresh": fresh})
     return offers
 
 
@@ -107,6 +112,20 @@ def otodom_location(ad):
     return street
 
 
+def otodom_fresh(ad):
+    """Свежее = создано за последние 2 дня (если сайт отдаёт дату)."""
+    created = ad.get("createdAtFirst") or ad.get("dateCreatedFirst") or ad.get("dateCreated")
+    if not created:
+        return True
+    try:
+        dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - dt < timedelta(days=2)
+    except ValueError:
+        return True
+
+
 def get_otodom():
     r = requests.get(OTODOM_URL, headers=HEADERS, timeout=30)
     r.raise_for_status()
@@ -123,6 +142,7 @@ def get_otodom():
             "price": otodom_price(ad),
             "loc": otodom_location(ad),
             "url": f"https://www.otodom.pl/pl/oferta/{ad['slug']}",
+            "fresh": otodom_fresh(ad),
         })
     return offers
 
@@ -161,7 +181,7 @@ def main():
             send(f"✅ {name} подключён: сейчас {len(offers)} объявлений. "
                  "Буду присылать только новые.")
         else:
-            for o in reversed(new):
+            for o in reversed([o for o in new if o.get("fresh", True)]):
                 send(f"🏠 [{name}] {o['title']}\n💰 {o['price']}\n📍 {o['loc']}\n{o['url']}")
 
         seen[name] = (old + [o["id"] for o in new])[-500:]
