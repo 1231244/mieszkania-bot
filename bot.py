@@ -48,7 +48,7 @@ SNAPSHOT_FILE = "latest.json"   # все актуальные объявлени
 SNAPSHOT_PRICE = 6000           # для снимка берём квартиры до этой цены
 INFO_FILE = "adinfo.json"       # что бот узнал, открыв объявление: {ссылка: {pets, photo}}
 OLD_PETS_FILE = "pets.json"
-PETS_PER_RUN = 40               # сколько старых объявлений проверять за раз (новые — всегда)
+PETS_PER_RUN = 400              # сколько старых объявлений открывать за раз (новые — всегда)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -73,6 +73,10 @@ def tg(chat_id, method, payload):
 
 
 PETS_TEXT = {"yes": "🐾 Можно с животными", "no": "🚫 Без животных", "unknown": "❔ Животные: не указано"}
+def money(n):
+    return f"{n:,}".replace(",", " ") + " zł" if n else "?"
+
+
 ROOM_WORDS = {1: "1 комната", 2: "2 комнаты", 3: "3 комнаты", 4: "4+ комнаты"}
 
 
@@ -107,10 +111,17 @@ def card(o, is_new):
     if o.get("area_num"):
         head.append(f"{o['area_num']:g} м²")
     lines.append("🏠 <b>" + " · ".join(x for x in head if x) + "</b>")
-    price = f"💰 <b>{e(o['price'])}</b>"
+    price = f"💰 Аренда: {money(o.get('price_num')) if o.get('price_num') else e(o['price'])}"
     if o.get("ppm"):
         price += f" · {o['ppm']} zł/м²"
     lines.append(price)
+    if o.get("czynsz"):
+        lines.append(f"➕ Оплаты (czynsz): {money(o['czynsz'])}")
+    if o.get("price_num"):
+        deposit = f"+ {money(o['kaucja'])} кауция" if o.get("kaucja") else "+ кауция не указана"
+        lines.append(f"💳 <b>Итого: {money(o.get('total') or o['price_num'])}/мес</b> {deposit}")
+        if not o.get("czynsz"):
+            lines.append("<i>ℹ️ доп. оплаты в объявлении не указаны</i>")
     deal = o.get("deal")
     if deal is not None:
         if deal <= -5:
@@ -417,13 +428,14 @@ PETS_YES = [
 
 
 def ad_page(url):
-    """Открывает объявление: возвращает (текст описания, главное фото)."""
+    """Открывает объявление: возвращает (текст, главное фото, {czynsz, kaucja} из данных Otodom)."""
     r = requests.get(url, headers=HEADERS, timeout=20)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     og = soup.find("meta", property="og:image")
     photo = og.get("content", "") if og else ""
     parts = []
+    extras = {}
     for sel in ['[data-cy="ad_description"]', '[data-testid="ad-parameters-container"]',
                 '[data-cy="adPageAdDescription"]', '[data-testid="ad.top-information.table"]',
                 '[data-testid="ad.additional-information.table"]']:
@@ -434,13 +446,66 @@ def ad_page(url):
         try:
             ad = json.loads(script.string).get("props", {}).get("pageProps", {}).get("ad") or {}
             parts.append(BeautifulSoup(ad.get("description") or "", "html.parser").get_text(" "))
-            parts.append(json.dumps(ad.get("characteristics") or [], ensure_ascii=False))
+            chars = ad.get("characteristics") or []
+            parts.append(json.dumps(chars, ensure_ascii=False))
+            for c in chars:
+                if isinstance(c, dict) and c.get("key") in ("rent", "deposit"):
+                    n = to_int(c.get("value"))
+                    if n:
+                        extras["czynsz" if c["key"] == "rent" else "kaucja"] = n
             parts.append(json.dumps(ad.get("features") or [], ensure_ascii=False))
         except (ValueError, AttributeError):
             pass
     if not any(p.strip() for p in parts):
         parts.append(soup.get_text(" ", strip=True))
-    return " ".join(parts).lower(), photo
+    return " ".join(parts).lower(), photo, extras
+
+
+def to_int(value):
+    digits = re.sub(r"[^\d]", "", str(value or "").split(",")[0].split(".")[0])
+    return int(digits) if digits else None
+
+
+NUM = r"(\d{1,2}[\s.]?\d{3}|\d{2,4})(?:,\d{2})?\s*(?:zł|zl|pln)"
+CZYNSZ_PATTERNS = [
+    r"czynsz\s*\(?dodatkowo\)?\s*[:\-–]?\s*" + NUM,
+    r"czynsz\s*(?:administracyjny|do spółdzielni|do wspólnoty|adm\.?)\s*[:\-–]?\s*(?:ok\.?\s*)?" + NUM,
+    r"opłat\w*\s*(?:administracyjn\w*|eksploatacyjn\w*)\s*[:\-–]?\s*(?:ok\.?\s*)?" + NUM,
+    r"\+\s*czynsz\s*[:\-–]?\s*(?:ok\.?\s*)?" + NUM,
+    r"\+\s*" + NUM + r"\s*(?:czynsz|opłat)",
+]
+KAUCJA_PATTERNS = [
+    r"kaucj\w*[^0-9\n]{0,35}?" + NUM,
+    r"depozyt\w*[^0-9\n]{0,25}?" + NUM,
+]
+
+
+def costs_from_text(text, rent, extras):
+    """Доп. оплаты (czynsz) и кауция: из данных сайта, иначе ищем в тексте объявления."""
+    czynsz = extras.get("czynsz")
+    if not czynsz:
+        for p in CZYNSZ_PATTERNS:
+            m = re.search(p, text)
+            if m:
+                n = to_int(m.group(1))
+                if n and 50 <= n <= 2500 and n != rent:
+                    czynsz = n
+                    break
+    kaucja = extras.get("kaucja")
+    if not kaucja:
+        for p in KAUCJA_PATTERNS:
+            m = re.search(p, text)
+            if m:
+                n = to_int(m.group(1))
+                if n and 300 <= n <= 30000:
+                    kaucja = n
+                    break
+    if not kaucja and rent:   # «kaucja w wysokości jednomiesięcznego czynszu» и т.п.
+        m = re.search(r"kaucj\w*[^.\n]{0,50}?(jedno|1[\s-]?|dwu|2[\s-]?|trzy|3[\s-]?)\s*-?\s*miesi", text)
+        if m:
+            k = {"jedno": 1, "dwu": 2, "trzy": 3}.get(m.group(1).strip(" -"), None) or int(m.group(1).strip(" -"))
+            kaucja = rent * k
+    return czynsz, kaucja
 
 
 def pets_from_text(text):
@@ -451,18 +516,23 @@ def pets_from_text(text):
     return "unknown"
 
 
-def check_ads(urls, info, need_photo, limit=None):
-    """Открывает объявления, которых ещё нет в кэше: узнаёт животных и фото."""
+INFO_VERSION = 2   # поднимаем, когда бот начинает узнавать из объявления что-то новое
+
+
+def check_ads(urls, info, need_photo, rents, limit=None):
+    """Открывает объявления, которых ещё нет в кэше: животные, фото, оплаты, кауция."""
     checked = 0
     for url in urls:
         known = info.get(url)
-        if known and (known.get("photo") or url not in need_photo):
+        if known and known.get("v") == INFO_VERSION and (known.get("photo") or url not in need_photo):
             continue
         if limit is not None and checked >= limit:
             break
         try:
-            text, photo = ad_page(url)
-            info[url] = {"pets": pets_from_text(text), "photo": photo or "none"}
+            text, photo, extras = ad_page(url)
+            czynsz, kaucja = costs_from_text(text, rents.get(url), extras)
+            info[url] = {"v": INFO_VERSION, "pets": pets_from_text(text), "photo": photo or "none",
+                         "czynsz": czynsz, "kaucja": kaucja}
         except Exception as e:
             print(f"Не открылось {url} — {e}")
         checked += 1
@@ -528,15 +598,20 @@ def main():
     # объявления без фото проверяем в первую очередь
     need_photo = {o["url"] for _, _, offs in fetched for o in offs if not o.get("photo")}
     other_urls.sort(key=lambda u: 0 if u in need_photo else 1)
-    n1 = check_ads(dict.fromkeys(new_urls), info, need_photo)
-    # все объявления без фото — сразу, остальные — понемногу
-    n2 = check_ads(dict.fromkeys(u for u in other_urls if u in need_photo), info, need_photo, limit=200)
-    n2 += check_ads(dict.fromkeys(other_urls), info, need_photo, limit=PETS_PER_RUN)
+    rents = {o["url"]: o.get("price_num") for _, _, offs in fetched for o in offs}
+    n1 = check_ads(dict.fromkeys(new_urls), info, need_photo, rents)
+    # сначала объявления без фото, потом остальные
+    n2 = check_ads(dict.fromkeys(u for u in other_urls if u in need_photo), info, need_photo, rents, limit=200)
+    n2 += check_ads(dict.fromkeys(other_urls), info, need_photo, rents, limit=PETS_PER_RUN)
     print(f"Объявления: открыто новых {n1}, старых {n2}, всего известно {len(info)}")
     for _, _, offers in fetched:
         for o in offers:
             known = info.get(o["url"]) or {}
             o["pets"] = known.get("pets", "unknown")
+            o["czynsz"] = known.get("czynsz")
+            o["kaucja"] = known.get("kaucja")
+            if o.get("price_num"):
+                o["total"] = o["price_num"] + (o["czynsz"] or 0)
             if not o.get("photo") and known.get("photo") not in (None, "", "none"):
                 o["photo"] = known["photo"]
     with open(INFO_FILE, "w", encoding="utf-8") as f:
@@ -556,7 +631,8 @@ def main():
                 for u in users:
                     if u.get("hideNoPets") and o.get("pets") == "no":
                         continue
-                    if rooms in u["rooms"] and o.get("price_num") and o["price_num"] <= u["maxPrice"]:
+                    pay = o.get("total") or o.get("price_num")
+                    if rooms in u["rooms"] and pay and pay <= u["maxPrice"]:
                         to_send[u["id"]].append(o)
         seen[key] = (seen.get(key, []) + [o["id"] for o in new])[-500:]
         print(f"{key}: новых {len(new)}")
