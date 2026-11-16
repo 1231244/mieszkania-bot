@@ -130,12 +130,14 @@ def card(o, is_new):
 
 
 def card_buttons(o):
-    row = [{"text": "Открыть ↗", "url": o["url"]}, {"text": "⭐", "callback_data": "fav"}]
-    where = o.get("district_short")
-    if where:
-        q = requests.utils.quote(f"{where}, Wrocław")
-        row.append({"text": "🗺 Карта", "url": f"https://www.google.com/maps/search/?api=1&query={q}"})
-    return {"inline_keyboard": [row]}
+    second = [{"text": "⭐ В избранное", "callback_data": "fav"}]
+    if o.get("district_short"):
+        q = requests.utils.quote(f"{o['district_short']}, Wrocław")
+        second.append({"text": "🗺 Карта", "url": f"https://www.google.com/maps/search/?api=1&query={q}"})
+    return {"inline_keyboard": [
+        [{"text": "🔗 Открыть объявление", "url": o["url"], "style": "primary"}],
+        second,
+    ]}
 
 
 def send_offer(chat_id, o):
@@ -153,7 +155,7 @@ def send_more(chat_id, count):
     tg(chat_id, "sendMessage", {
         "text": f"📬 И ещё <b>{count}</b> новых квартир по твоим фильтрам",
         "parse_mode": "HTML",
-        "reply_markup": {"inline_keyboard": [[{"text": "👀 Посмотреть", "callback_data": "show:0"}]]},
+        "reply_markup": {"inline_keyboard": [[{"text": "👀 Листать все", "callback_data": "show:0", "style": "success"}]]},
     })
 
 
