@@ -10,31 +10,36 @@ import requests
 from bs4 import BeautifulSoup
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID = os.environ["CHAT_ID"]
+WORKER_URL = os.environ["WORKER_URL"].rstrip("/")   # адрес «мозга» на Cloudflare
+API_KEY = os.environ["API_KEY"]
 
-# ===== ФИЛЬТРЫ (меняй здесь) =====
-MAX_PRICE = 3200   # максимальная цена, zł
-ROOMS = 2          # количество комнат: 1, 2, 3 или 4
+# ===== НАСТРОЙКИ =====
 QUIET_FROM = 23    # тихие часы: с 23:00...
 QUIET_TO = 7       # ...до 7:00 — сообщения без звука
-# =================================
+# ======================
 WARSAW = ZoneInfo("Europe/Warsaw")
 
-ROOMS_OLX = {1: "one", 2: "two", 3: "three", 4: "four"}[ROOMS]
-ROOMS_OTODOM = {1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR"}[ROOMS]
+ROOMS_OLX = {1: "one", 2: "two", 3: "three", 4: "four"}
+ROOMS_OTODOM = {1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR"}
 
-OLX_URL = (
-    "https://www.olx.pl/nieruchomosci/mieszkania/wynajem/wroclaw/"
-    f"?search%5Bfilter_float_price:to%5D={MAX_PRICE}"
-    f"&search%5Bfilter_enum_rooms%5D%5B0%5D={ROOMS_OLX}"
-    "&search%5Bprivate_business%5D=private"
-    "&search%5Border%5D=created_at:desc"
-)
-OTODOM_URL = (
-    "https://www.otodom.pl/pl/wyniki/wynajem/mieszkanie/dolnoslaskie/wroclaw/wroclaw/wroclaw"
-    f"?roomsNumber=%5B{ROOMS_OTODOM}%5D&priceMax={MAX_PRICE}"
-    "&ownerTypeSingleSelect=PRIVATE&by=LATEST&direction=DESC&limit=36"
-)
+
+def olx_url(rooms, max_price):
+    return (
+        "https://www.olx.pl/nieruchomosci/mieszkania/wynajem/wroclaw/"
+        f"?search%5Bfilter_float_price:to%5D={max_price}"
+        f"&search%5Bfilter_enum_rooms%5D%5B0%5D={ROOMS_OLX[rooms]}"
+        "&search%5Bprivate_business%5D=private"
+        "&search%5Border%5D=created_at:desc"
+    )
+
+
+def otodom_url(rooms, max_price):
+    return (
+        "https://www.otodom.pl/pl/wyniki/wynajem/mieszkanie/dolnoslaskie/wroclaw/wroclaw/wroclaw"
+        f"?roomsNumber=%5B{ROOMS_OTODOM[rooms]}%5D&priceMax={max_price}"
+        "&ownerTypeSingleSelect=PRIVATE&by=LATEST&direction=DESC&limit=36"
+    )
+
 
 SEEN_FILE = "seen.json"
 HEADERS = {
@@ -52,19 +57,15 @@ def is_quiet():
     return h >= QUIET_FROM or h < QUIET_TO
 
 
-def tg(method, payload):
-    payload = {"chat_id": CHAT_ID.strip(), "disable_notification": is_quiet(), **payload}
-    r = requests.post(f"{API}/{method}", json=payload, timeout=30)
+def tg(chat_id, method, payload):
+    data = {"chat_id": chat_id, "disable_notification": is_quiet(), **payload}
+    r = requests.post(f"{API}/{method}", json=data, timeout=30)
     if not r.ok:
-        print(f"Telegram НЕ отправил ({method}): {r.status_code} {r.text}")
+        print(f"Telegram НЕ отправил ({method}) для {chat_id}: {r.status_code} {r.text}")
     return r.ok
 
 
-def send(text):
-    tg("sendMessage", {"text": text, "parse_mode": "HTML"})
-
-
-def send_offer(o, source):
+def send_offer(chat_id, o, source):
     e = html.escape
     lines = [f"🏠 <b>{e(o['title'])}</b>", "", f"💰 <b>{e(o['price'])}</b>"]
     if o.get("area"):
@@ -75,20 +76,28 @@ def send_offer(o, source):
         lines.append(f"🆕 {e(o['when'])}")
     lines.append(f"🔎 {source}")
     caption = "\n".join(lines)
-    buttons = {"inline_keyboard": [[{"text": f"Открыть на {source} ↗", "url": o["url"]}]]}
+    buttons = {"inline_keyboard": [[
+        {"text": f"Открыть на {source} ↗", "url": o["url"]},
+        {"text": "⭐ В избранное", "callback_data": "fav"},
+    ]]}
 
     if o.get("photo"):
-        ok = tg("sendPhoto", {"photo": o["photo"], "caption": caption,
+        ok = tg(chat_id, "sendPhoto", {"photo": o["photo"], "caption": caption,
                               "parse_mode": "HTML", "reply_markup": buttons})
         if ok:
             return
-    tg("sendMessage", {"text": caption, "parse_mode": "HTML", "reply_markup": buttons,
+    tg(chat_id, "sendMessage", {"text": caption, "parse_mode": "HTML", "reply_markup": buttons,
                        "disable_web_page_preview": True})
 
 
 # ---------- OLX ----------
-def get_olx():
-    r = requests.get(OLX_URL, headers=HEADERS, timeout=30)
+def price_number(text):
+    digits = re.sub(r"[^\d]", "", text.split(",")[0])
+    return int(digits) if digits else None
+
+
+def get_olx(rooms, max_price):
+    r = requests.get(olx_url(rooms, max_price), headers=HEADERS, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     offers = []
@@ -126,6 +135,7 @@ def get_olx():
         # свежее = опубликовано сегодня и не «поднято» (Odświeżono)
         fresh = ("Dzisiaj" in loc) and ("Odświeżono" not in loc) and not featured
         offers.append({"id": ad_id, "title": title, "price": price, "loc": loc,
+                       "price_num": price_number(price),
                        "district": district, "when": when, "area": area,
                        "photo": photo, "url": url, "fresh": fresh})
     return offers
@@ -202,8 +212,8 @@ def otodom_when(ad):
         return ""
 
 
-def get_otodom():
-    r = requests.get(OTODOM_URL, headers=HEADERS, timeout=30)
+def get_otodom(rooms, max_price):
+    r = requests.get(otodom_url(rooms, max_price), headers=HEADERS, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     script = soup.find("script", id="__NEXT_DATA__")
@@ -216,6 +226,7 @@ def get_otodom():
             "id": str(ad["id"]),
             "title": ad.get("title", "Объявление"),
             "price": otodom_price(ad),
+            "price_num": price_number(otodom_price(ad)),
             "loc": otodom_location(ad),
             "url": f"https://www.otodom.pl/pl/oferta/{ad['slug']}",
             "district": otodom_location(ad),
@@ -231,48 +242,59 @@ SOURCES = {"OLX": get_olx, "Otodom": get_otodom}
 
 
 # ---------- ГЛАВНОЕ ----------
+def get_users():
+    r = requests.get(f"{WORKER_URL}/users", params={"key": API_KEY}, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
 def main():
-    # При ручном запуске (Run workflow) — тест + пример оформления
-    manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-    if manual:
-        send("🔔 <b>Тест:</b> бот работает и проверяет OLX + Otodom")
-    example_sent = False
+    users = get_users()
+    print(f"Подписчиков: {len(users)}")
+    if not users:
+        return
 
     seen = {}
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE, encoding="utf-8") as f:
             seen = json.load(f)
-        if isinstance(seen, list):          # старый формат
-            seen = {"OLX": seen}
+        if not isinstance(seen, dict):
+            seen = {}
 
-    for name, getter in SOURCES.items():
-        try:
-            offers = getter()
-        except Exception as e:
-            print(f"{name}: ошибка — {e}")
-            continue
-        if not offers:
-            print(f"{name}: объявлений не найдено (сайт изменился или заблокировал запрос)")
-            continue
+    already_sent = set()   # чтобы одно объявление не пришло человеку дважды
 
-        if manual and not example_sent:
-            send("👀 <b>Пример</b> того, как выглядят объявления:")
-            send_offer(offers[0], name)
-            example_sent = True
+    # Для каждого количества комнат — одна проверка с максимальной ценой среди подписчиков
+    all_rooms = sorted({r for u in users for r in u["rooms"]})
+    for rooms in all_rooms:
+        wanting = [u for u in users if rooms in u["rooms"]]
+        max_price = max(u["maxPrice"] for u in wanting)
 
-        first_run = name not in seen
-        old = seen.get(name, [])
-        new = [o for o in offers if o["id"] not in set(old)]
+        for name, getter in SOURCES.items():
+            key = f"{name}:{rooms}"
+            try:
+                offers = getter(rooms, max_price)
+            except Exception as e:
+                print(f"{key}: ошибка — {e}")
+                continue
+            if not offers:
+                print(f"{key}: объявлений не найдено")
+                continue
 
-        if first_run:
-            send(f"✅ {name} подключён: сейчас {len(offers)} объявлений. "
-                 "Буду присылать только новые.")
-        else:
-            for o in reversed([o for o in new if o.get("fresh", True)]):
-                send_offer(o, name)
+            first_run = key not in seen
+            old = set(seen.get(key, []))
+            new = [o for o in offers if o["id"] not in old]
 
-        seen[name] = (old + [o["id"] for o in new])[-500:]
-        print(f"{name}: найдено {len(offers)}, новых {len(new)}")
+            if not first_run:   # при первой проверке просто запоминаем, без рассылки
+                for o in reversed([o for o in new if o.get("fresh", True)]):
+                    for u in wanting:
+                        if (u["id"], o["url"]) in already_sent:
+                            continue
+                        if o.get("price_num") is None or o["price_num"] <= u["maxPrice"]:
+                            send_offer(u["id"], o, name)
+                            already_sent.add((u["id"], o["url"]))
+
+            seen[key] = (seen.get(key, []) + [o["id"] for o in new])[-500:]
+            print(f"{key}: найдено {len(offers)}, новых {len(new)}")
 
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(seen, f)
