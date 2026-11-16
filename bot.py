@@ -101,43 +101,48 @@ def ago_text(mins):
 
 
 def card(o, is_new):
-    """Текст карточки квартиры (одинаковый для уведомлений и «Показать сейчас»)."""
+    """Компактная карточка квартиры (одинаковая для уведомлений и «Показать сейчас»)."""
     e = html.escape
     lines = []
     ago = ago_text(minutes_ago(o.get("posted_at")))
     if is_new:
-        lines += [f"🔥 <b>Новое</b>" + (f" · {ago}" if ago else ""), ""]
+        lines += ["🔥 <b>Новое</b>" + (f" · {ago}" if ago else ""), ""]
+
+    # 1. Что и где
     head = [ROOM_WORDS.get(o.get("rooms"), "")]
     if o.get("area_num"):
         head.append(f"{o['area_num']:g} м²")
     lines.append("🏠 <b>" + " · ".join(x for x in head if x) + "</b>")
-    price = f"💰 Аренда: {money(o.get('price_num')) if o.get('price_num') else e(o['price'])}"
-    if o.get("ppm"):
-        price += f" · {o['ppm']} zł/м²"
-    lines.append(price)
-    if o.get("czynsz"):
-        lines.append(f"➕ Оплаты (czynsz): {money(o['czynsz'])}")
-    if o.get("price_num"):
-        deposit = f"+ {money(o['kaucja'])} кауция" if o.get("kaucja") else "+ кауция не указана"
-        lines.append(f"💳 <b>Итого: {money(o.get('total') or o['price_num'])}/мес</b> {deposit}")
-        if not o.get("czynsz"):
-            lines.append("<i>ℹ️ доп. оплаты в объявлении не указаны</i>")
-    deal = o.get("deal")
-    if deal is not None:
-        if deal <= -5:
-            lines.append(f"💚 Дешевле среднего на {abs(deal)}%")
-        elif deal >= 10:
-            lines.append(f"🔴 Дороже среднего на {deal}%")
-        else:
-            lines.append("⚪ Средняя цена по рынку")
     if o.get("district_short"):
         lines.append(f"📍 {e(o['district_short'])}")
-    lines.append(PETS_TEXT.get(o.get("pets"), PETS_TEXT["unknown"]))
-    lines += ["", f"<i>{e(o['title'][:90])}</i>", ""]
-    tail = f"👤 Частник · {o['source']}"
+
+    # 2. Деньги: сколько платить в месяц и кауция
+    rent = o.get("price_num")
+    if rent:
+        if o.get("czynsz"):
+            lines.append(f"💳 <b>{money(rent + o['czynsz'])}/мес</b>")
+            lines.append(f"     {money(rent)} аренда + {money(o['czynsz'])} оплаты")
+        else:
+            lines.append(f"💳 <b>{money(rent)}/мес</b> · оплаты не указаны")
+    else:
+        lines.append(f"💳 {e(o['price'])}")
+    lines.append(f"🔐 Кауция: {money(o['kaucja'])}" if o.get("kaucja") else "🔐 Кауция: не указана")
+
+    # 3. Плюсы и минусы — только если есть что сказать
+    deal = o.get("deal")
+    if deal is not None and deal <= -5:
+        lines.append(f"💚 На {abs(deal)}% дешевле рынка")
+    elif deal is not None and deal >= 10:
+        lines.append(f"🔺 На {deal}% дороже рынка")
+    if o.get("pets") in ("yes", "no"):
+        lines.append(PETS_TEXT[o["pets"]])
+
+    # 4. Заголовок хозяина и источник
+    lines += ["", f"<i>{e(o['title'][:80])}</i>"]
+    tail = f"{o['source']} · частник"
     if not is_new and ago:
         tail += f" · {ago}"
-    lines.append(tail)
+    lines.append(f"<i>{tail}</i>")
     return "\n".join(lines)
 
 
@@ -147,7 +152,7 @@ def card_buttons(o):
         q = requests.utils.quote(f"{o['district_short']}, Wrocław")
         second.append({"text": "🗺 Карта", "url": f"https://www.google.com/maps/search/?api=1&query={q}"})
     return {"inline_keyboard": [
-        [{"text": "🔗 Открыть объявление", "url": o["url"], "style": "primary"}],
+        [{"text": "🔗 Открыть объявление", "url": o["url"]}],
         second,
     ]}
 
@@ -180,6 +185,16 @@ def short_district(text):
         if p.lower() not in [x.lower() for x in out]:   # «Krzyki, Krzyki» → «Krzyki»
             out.append(p)
     return ", ".join(out[:2])
+
+
+def is_single_room(o):
+    """«Pokój do wynajęcia» — комната в общей квартире, а не квартира."""
+    t = (o.get("title") or "").lower().strip()
+    if re.match(r"(do wynajęcia\s+|wynajmę\s+)?pok[oó]j\b", t):   # заголовок начинается с «Pokój»
+        return True
+    if re.search(r"\bpok[oó]j\b(?!\w)", t) and not re.search(r"\d\s*-?\s*pok|pokoje|pokojow|dwupok|trzypok|kawalerk", t):
+        return True
+    return bool(o.get("area_num") and o.get("rooms", 1) >= 2 and o["area_num"] < 18)
 
 
 def enrich(o, rooms, source):
@@ -480,7 +495,7 @@ def to_int(value):
     return int(digits) if digits else None
 
 
-NUM = r"(\d{1,2}[\s.]?\d{3}|\d{2,4})(?:,\d{2})?\s*(?:zł|zl|pln)"
+NUM = r"(\d{1,2}[\s.]?\d{3}|\d{2,4})(?:[,.]\d{2}|[,.]\s?[-–])?\s*(?:zł|zl|pln)"
 CZYNSZ_PATTERNS = [
     r"czynsz\s*\(?dodatkowo\)?\s*[:\-–]?\s*" + NUM,
     r"czynsz\s*[:\-–]\s*" + NUM,
@@ -532,7 +547,7 @@ def pets_from_text(text):
     return "unknown"
 
 
-INFO_VERSION = 3   # поднимаем, когда бот начинает узнавать из объявления что-то новое
+INFO_VERSION = 4   # поднимаем, когда бот начинает узнавать из объявления что-то новое
 
 
 def check_ads(urls, info, need_photo, rents, limit=None):
@@ -540,6 +555,8 @@ def check_ads(urls, info, need_photo, rents, limit=None):
     checked = 0
     for url in urls:
         known = info.get(url)
+        if known and known.get("v") == 3 and known.get("kaucja"):
+            known["v"] = INFO_VERSION   # кауция уже найдена — открывать заново не нужно
         if known and known.get("v") == INFO_VERSION and (known.get("photo") or url not in need_photo):
             continue
         if limit is not None and checked >= limit:
@@ -584,6 +601,7 @@ def main():
                 print(f"{key}: ошибка — {e}")
                 continue
             offers = [enrich(o, rooms, name) for o in offers if not o.get("featured")]
+            offers = [o for o in offers if not is_single_room(o)]   # только целые квартиры
             print(f"{key}: найдено {len(offers)}")
             fetched.append((key, rooms, offers))
 
