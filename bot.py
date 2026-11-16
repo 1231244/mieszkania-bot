@@ -385,6 +385,8 @@ def get_otodom(rooms, max_price):
     ads = find_ads(json.loads(script.string)) or []
     offers = []
     for ad in ads:
+        if ad.get("isPrivateOwner") is False or (isinstance(ad.get("agency"), dict) and ad["agency"].get("name")):
+            continue   # агентство — пропускаем
         offers.append({
             "id": str(ad["id"]),
             "title": ad.get("title", "Объявление"),
@@ -446,6 +448,14 @@ def ad_page(url):
         try:
             ad = json.loads(script.string).get("props", {}).get("pageProps", {}).get("ad") or {}
             parts.append(BeautifulSoup(ad.get("description") or "", "html.parser").get_text(" "))
+            if str(ad.get("advertiserType", "")).lower() in ("agency", "developer"):
+                extras["agency"] = True
+            target = ad.get("target") or {}
+            for k, v in (target.items() if isinstance(target, dict) else []):
+                if k.lower() in ("rent", "czynsz") and to_int(v):
+                    extras.setdefault("czynsz", to_int(v))
+                if k.lower() in ("deposit", "kaucja") and to_int(v):
+                    extras.setdefault("kaucja", to_int(v))
             chars = ad.get("characteristics") or []
             parts.append(json.dumps(chars, ensure_ascii=False))
             for c in chars:
@@ -456,8 +466,12 @@ def ad_page(url):
             parts.append(json.dumps(ad.get("features") or [], ensure_ascii=False))
         except (ValueError, AttributeError):
             pass
+    full = soup.get_text(" ", strip=True).lower()
     if not any(p.strip() for p in parts):
-        parts.append(soup.get_text(" ", strip=True))
+        parts.append(full)
+    if re.search(r"(typ ogłoszeniodawcy|ogłoszeniodawca)\s*:?\s*(biuro nieruchomości|agencja|deweloper)", full):
+        extras["agency"] = True
+    extras["full"] = full
     return " ".join(parts).lower(), photo, extras
 
 
@@ -469,6 +483,7 @@ def to_int(value):
 NUM = r"(\d{1,2}[\s.]?\d{3}|\d{2,4})(?:,\d{2})?\s*(?:zł|zl|pln)"
 CZYNSZ_PATTERNS = [
     r"czynsz\s*\(?dodatkowo\)?\s*[:\-–]?\s*" + NUM,
+    r"czynsz\s*[:\-–]\s*" + NUM,
     r"czynsz\s*(?:administracyjny|do spółdzielni|do wspólnoty|adm\.?)\s*[:\-–]?\s*(?:ok\.?\s*)?" + NUM,
     r"opłat\w*\s*(?:administracyjn\w*|eksploatacyjn\w*)\s*[:\-–]?\s*(?:ok\.?\s*)?" + NUM,
     r"\+\s*czynsz\s*[:\-–]?\s*(?:ok\.?\s*)?" + NUM,
@@ -482,6 +497,7 @@ KAUCJA_PATTERNS = [
 
 def costs_from_text(text, rent, extras):
     """Доп. оплаты (czynsz) и кауция: из данных сайта, иначе ищем в тексте объявления."""
+    text = text + " " + extras.get("full", "")
     czynsz = extras.get("czynsz")
     if not czynsz:
         for p in CZYNSZ_PATTERNS:
@@ -516,7 +532,7 @@ def pets_from_text(text):
     return "unknown"
 
 
-INFO_VERSION = 2   # поднимаем, когда бот начинает узнавать из объявления что-то новое
+INFO_VERSION = 3   # поднимаем, когда бот начинает узнавать из объявления что-то новое
 
 
 def check_ads(urls, info, need_photo, rents, limit=None):
@@ -532,7 +548,7 @@ def check_ads(urls, info, need_photo, rents, limit=None):
             text, photo, extras = ad_page(url)
             czynsz, kaucja = costs_from_text(text, rents.get(url), extras)
             info[url] = {"v": INFO_VERSION, "pets": pets_from_text(text), "photo": photo or "none",
-                         "czynsz": czynsz, "kaucja": kaucja}
+                         "czynsz": czynsz, "kaucja": kaucja, "agency": bool(extras.get("agency"))}
         except Exception as e:
             print(f"Не открылось {url} — {e}")
         checked += 1
@@ -608,6 +624,7 @@ def main():
         for o in offers:
             known = info.get(o["url"]) or {}
             o["pets"] = known.get("pets", "unknown")
+            o["agency"] = known.get("agency", False)
             o["czynsz"] = known.get("czynsz")
             o["kaucja"] = known.get("kaucja")
             if o.get("price_num"):
@@ -625,7 +642,7 @@ def main():
         new = [o for o in offers if o["id"] not in old]
         if not first_run:
             for o in new:
-                if not o.get("fresh", True) or o["sig"] in sigs:
+                if not o.get("fresh", True) or o["sig"] in sigs or o.get("agency"):
                     continue
                 sigs.add(o["sig"])
                 for u in users:
@@ -659,6 +676,7 @@ def main():
         for i in range(max((len(x) for x in lists), default=0)):
             for lst in lists:
                 if i < len(lst) and lst[i]["sig"] not in snap_sigs and lst[i].get("price_num") \
+                        and not lst[i].get("agency") \
                         and (minutes_ago(lst[i].get("posted_at")) or 0) < 60 * 24 * 60:
                     snap_sigs.add(lst[i]["sig"])
                     snapshot.append(lst[i])
