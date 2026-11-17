@@ -160,7 +160,9 @@ def card(o, is_new):
     else:
         lines.append(f"💳 {e(o['price'])}")
     lines.append(f"🔐 Кауция: {money(o['kaucja'])}" if o.get("kaucja") else "🔐 Кауция: не указана")
-    if o.get("drop") and is_new != "drop":
+    if o.get("price_hist") and len(o["price_hist"]) >= 2:
+        lines.append("📈 Цены: " + " → ".join(f"{p:,}".replace(",", " ") for p in o["price_hist"]) + " zł")
+    elif o.get("drop") and is_new != "drop":
         lines.append(f"📉 Цена снижена, было {money(o['drop']['from'])}")
 
     # 3. Плюсы и минусы — только если есть что сказать
@@ -192,7 +194,30 @@ def card_buttons(o):
     ]}
 
 
+SENT_LOG = {}   # что и кому отправили за этот запуск — уходит в «📜 Историю» пользователя
+
+
+def log_sent(chat_id, o, kind):
+    head = [ROOM_WORDS.get(o.get("rooms"), ""), f"{o['area_num']:g} м²" if o.get("area_num") else "",
+            money(o.get("total") or o.get("price_num")) if o.get("price_num") else "", o.get("district_short", "")]
+    SENT_LOG.setdefault(str(chat_id), []).append({
+        "t": " · ".join(x for x in head if x), "url": o["url"],
+        "at": datetime.now(WARSAW).isoformat(timespec="minutes"), "k": "drop" if kind == "drop" else "new",
+    })
+
+
+def push_history():
+    if not SENT_LOG:
+        return
+    try:
+        r = requests.post(f"{WORKER_URL}/history", params={"key": API_KEY}, json={"items": SENT_LOG}, timeout=30)
+        print(f"История: сохранено для {len(SENT_LOG)} чел. ({r.status_code})")
+    except Exception as e:
+        print(f"История: не сохранилась — {e}")
+
+
 def send_offer(chat_id, o, kind=True):
+    log_sent(chat_id, o, kind)
     caption = card(o, is_new=kind)
     buttons = card_buttons(o)
     if o.get("photo"):
@@ -768,6 +793,8 @@ def main():
                         and not first_prices:
                     drops[o["url"]] = o
             h = rec["h"]
+            if len(h) >= 2:
+                o["price_hist"] = [x[1] for x in h][-4:]
             if len(h) >= 2 and h[-1][1] < h[-2][1] and (minutes_ago(h[-1][0]) or 0) < 14 * 24 * 60:
                 o["drop"] = {"from": h[-2][1], "at": h[-1][0]}
     # забываем объявления, которых не видно больше 30 дней
@@ -818,6 +845,8 @@ def main():
         for o in offers[:MAX_PER_RUN]:
             send_offer(uid, o, kind="drop")
         print(f"Пользователю {uid}: снижений цены {len(offers)}")
+
+    push_history()
 
     seen["_sigs"] = list(sigs)[-1000:]
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
