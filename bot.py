@@ -808,6 +808,9 @@ def main():
                 o["geo"] = known["geo"]
     with open(INFO_FILE, "w", encoding="utf-8") as f:
         json.dump(dict(list(info.items())[-3000:]), f, ensure_ascii=False)
+    for name in SOURCES:   # для проверки карты: сколько объявлений с координатами
+        offs = [o for k, r, lst in fetched if k.startswith(name + ":") for o in lst]
+        print(f"Координаты {name}: {sum(1 for o in offs if o.get('geo'))} из {len(offs)}")
 
     # 3.5) История цен: запоминаем цену аренды, ищем снижения
     prices = {}
