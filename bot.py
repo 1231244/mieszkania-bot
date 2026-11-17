@@ -125,7 +125,10 @@ def card(o, is_new):
     lines = []
     ago = ago_text(minutes_ago(o.get("posted_at")))
     if is_new:
-        lines += ["🔥 <b>Новое</b>" + (f" · {ago}" if ago else ""), ""]
+        head = "🔥 <b>Новое</b>" + (f" · {ago}" if ago else "")
+        if o.get("search_name"):
+            head += f" · 🔎 {e(o['search_name'])}"
+        lines += [head, ""]
 
     # 1. Что и где
     head = [ROOM_WORDS.get(o.get("rooms"), "")]
@@ -741,9 +744,9 @@ def main():
                 if not o.get("fresh", True) or o["sig"] in sigs or o.get("agency"):
                     continue
                 sigs.add(o["sig"])
-                for u in users:
-                    if user_matches(u, o, rooms):
-                        to_send[u["id"]].append(o)
+                for u in users:   # u = один поиск человека (у человека может быть до 5)
+                    if user_matches(u, o, rooms) and all(x["url"] != o["url"] for x in to_send[u["id"]]):
+                        to_send[u["id"]].append(dict(o, search_name=u.get("search", "")))
         seen[key] = (seen.get(key, []) + [o["id"] for o in new])[-500:]
         print(f"{key}: новых {len(new)}")
 
