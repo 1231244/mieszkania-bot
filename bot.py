@@ -101,6 +101,39 @@ def money(n):
 
 ROOM_WORDS = {1: "1 комната", 2: "2 комнаты", 3: "3 комнаты", 4: "4+ комнаты"}
 
+# ---------- 🌐 Тексты карточек на 4 языках ----------
+T = {
+    "ru": {"new": "🔥 <b>Новая квартира</b>", "drop": "📉 <b>Цена снизилась</b>", "fav": "⭐ из избранного",
+           "was": "было {a} → стало {b}", "month": "в месяц", "fees": "аренда {a} + оплаты {b}", "dep": "кауция {a}",
+           "cheap": "💚 дешевле рынка", "pets_yes": "🐾 можно с животными", "pets_no": "🚫 без животных",
+           "open": "🔗 Открыть", "save": "⭐ Сохранить", "more": "📬 Ещё новых квартир по твоим фильтрам: <b>{n}</b>",
+           "more_btn": "👀 Смотреть все в приложении", "rooms": {1: "1 комната", 2: "2 комнаты", 3: "3 комнаты", 4: "4+ комнаты"},
+           "m2": "м²", "min": "{n} мин назад", "h": "{n} ч назад", "d": "{n} дн назад"},
+    "uk": {"new": "🔥 <b>Нова квартира</b>", "drop": "📉 <b>Ціна знизилась</b>", "fav": "⭐ з обраного",
+           "was": "було {a} → стало {b}", "month": "на місяць", "fees": "оренда {a} + оплати {b}", "dep": "кауція {a}",
+           "cheap": "💚 дешевше ринку", "pets_yes": "🐾 можна з тваринами", "pets_no": "🚫 без тварин",
+           "open": "🔗 Відкрити", "save": "⭐ Зберегти", "more": "📬 Ще нових квартир за твоїми фільтрами: <b>{n}</b>",
+           "more_btn": "👀 Дивитись усі в застосунку", "rooms": {1: "1 кімната", 2: "2 кімнати", 3: "3 кімнати", 4: "4+ кімнати"},
+           "m2": "м²", "min": "{n} хв тому", "h": "{n} год тому", "d": "{n} дн тому"},
+    "pl": {"new": "🔥 <b>Nowe mieszkanie</b>", "drop": "📉 <b>Cena spadła</b>", "fav": "⭐ z ulubionych",
+           "was": "było {a} → jest {b}", "month": "miesięcznie", "fees": "najem {a} + czynsz {b}", "dep": "kaucja {a}",
+           "cheap": "💚 taniej niż rynek", "pets_yes": "🐾 można ze zwierzętami", "pets_no": "🚫 bez zwierząt",
+           "open": "🔗 Otwórz", "save": "⭐ Zapisz", "more": "📬 Więcej nowych mieszkań według twoich filtrów: <b>{n}</b>",
+           "more_btn": "👀 Zobacz wszystkie w aplikacji", "rooms": {1: "1 pokój", 2: "2 pokoje", 3: "3 pokoje", 4: "4+ pokoje"},
+           "m2": "m²", "min": "{n} min temu", "h": "{n} godz. temu", "d": "{n} dni temu"},
+    "en": {"new": "🔥 <b>New apartment</b>", "drop": "📉 <b>Price dropped</b>", "fav": "⭐ from saved",
+           "was": "was {a} → now {b}", "month": "per month", "fees": "rent {a} + fees {b}", "dep": "deposit {a}",
+           "cheap": "💚 below market", "pets_yes": "🐾 pets allowed", "pets_no": "🚫 no pets",
+           "open": "🔗 Open", "save": "⭐ Save", "more": "📬 More new apartments matching your filters: <b>{n}</b>",
+           "more_btn": "👀 See all in the app", "rooms": {1: "1 room", 2: "2 rooms", 3: "3 rooms", 4: "4+ rooms"},
+           "m2": "m²", "min": "{n} min ago", "h": "{n} h ago", "d": "{n} days ago"},
+}
+USER_LANG = {}   # id → язык, заполняется из /users
+
+
+def tr(chat_id):
+    return T.get(USER_LANG.get(str(chat_id)), T["ru"])
+
 
 def minutes_ago(posted_at):
     if not posted_at:
@@ -112,58 +145,60 @@ def minutes_ago(posted_at):
     return int((datetime.now(WARSAW) - dt).total_seconds() // 60)
 
 
-def ago_text(mins):
+def ago_text(mins, t=None):
+    t = t or T["ru"]
     if mins is None or mins < 0:
         return ""
     if mins < 60:
-        return f"{max(mins, 1)} мин назад"
+        return t["min"].format(n=max(mins, 1))
     if mins < 24 * 60:
-        return f"{mins // 60} ч назад"
-    return f"{mins // (24 * 60)} дн назад"
+        return t["h"].format(n=mins // 60)
+    return t["d"].format(n=mins // (24 * 60))
 
 
-def card(o, is_new):
+def card(o, is_new, t=None):
     """Короткая карточка: цена, что и где, главное — и две кнопки."""
+    t = t or T["ru"]
     e = html.escape
     lines = []
-    ago = ago_text(minutes_ago(o.get("posted_at")))
+    ago = ago_text(minutes_ago(o.get("posted_at")), t)
     tag = f" · 🔎 {e(o['search_name'])}" if o.get("search_name") else ""
     if is_new == "drop":
         cz = o.get("czynsz") or 0   # показываем так же, как цену ниже: вместе с оплатами
         old, new = o["drop"]["from"] + cz, o["price_num"] + cz
-        lines += [f"📉 <b>Цена снизилась</b>" + (" · ⭐ из избранного" if o.get("is_fav") else tag),
-                  f"было {money(old)} → стало {money(new)}", ""]
+        lines += [t["drop"] + (f" · {t['fav']}" if o.get("is_fav") else tag),
+                  t["was"].format(a=money(old), b=money(new)), ""]
     elif is_new:
-        lines += ["🔥 <b>Новая квартира</b>" + (f" · {ago}" if ago else "") + tag, ""]
+        lines += [t["new"] + (f" · {ago}" if ago else "") + tag, ""]
 
     rent = o.get("price_num")
     if rent:
-        lines.append(f"💳 <b>{money(rent + (o.get('czynsz') or 0))} в месяц</b>")
+        lines.append(f"💳 <b>{money(rent + (o.get('czynsz') or 0))} {t['month']}</b>")
     else:
         lines.append(f"💳 {e(o['price'])}")
-    head = [ROOM_WORDS.get(o.get("rooms"), "")]
+    head = [t["rooms"].get(o.get("rooms"), "")]
     if o.get("area_num"):
-        head.append(f"{o['area_num']:g} м²")
+        head.append(f"{o['area_num']:g} {t['m2']}")
     lines.append("🏠 " + " · ".join(x for x in head if x))
     if o.get("district_short"):
         lines.append(f"📍 {e(o['district_short'])}")
 
     extra = []
     if rent and o.get("czynsz"):
-        extra.append(f"аренда {money(rent)} + оплаты {money(o['czynsz'])}")
+        extra.append(t["fees"].format(a=money(rent), b=money(o["czynsz"])))
     if o.get("kaucja"):
-        extra.append(f"кауция {money(o['kaucja'])}")
+        extra.append(t["dep"].format(a=money(o["kaucja"])))
     if extra:
         lines.append("<i>" + " · ".join(extra) + "</i>")
 
     plus = []
     deal = o.get("deal")
     if deal is not None and deal <= -5:
-        plus.append("💚 дешевле рынка")
+        plus.append(t["cheap"])
     if o.get("pets") == "yes":
-        plus.append("🐾 можно с животными")
+        plus.append(t["pets_yes"])
     elif o.get("pets") == "no":
-        plus.append("🚫 без животных")
+        plus.append(t["pets_no"])
     if plus:
         lines.append(" · ".join(plus))
     if not is_new and ago:
@@ -171,10 +206,11 @@ def card(o, is_new):
     return "\n".join(lines)
 
 
-def card_buttons(o):
+def card_buttons(o, t=None):
+    t = t or T["ru"]
     return {"inline_keyboard": [[
-        {"text": "🔗 Открыть", "url": o["url"]},
-        {"text": "⭐ Сохранить", "callback_data": "fav"},
+        {"text": t["open"], "url": o["url"]},
+        {"text": t["save"], "callback_data": "fav"},
     ]]}
 
 
@@ -202,8 +238,9 @@ def push_history():
 
 def send_offer(chat_id, o, kind=True):
     log_sent(chat_id, o, kind)
-    caption = card(o, is_new=kind)
-    buttons = card_buttons(o)
+    t = tr(chat_id)
+    caption = card(o, kind, t)
+    buttons = card_buttons(o, t)
     if o.get("photo"):
         if tg(chat_id, "sendPhoto", {"photo": o["photo"], "caption": caption,
                                      "parse_mode": "HTML", "reply_markup": buttons}):
@@ -213,10 +250,11 @@ def send_offer(chat_id, o, kind=True):
 
 
 def send_more(chat_id, count):
+    t = tr(chat_id)
     tg(chat_id, "sendMessage", {
-        "text": f"📬 И ещё <b>{count}</b> новых квартир по твоим фильтрам",
+        "text": t["more"].format(n=count),
         "parse_mode": "HTML",
-        "reply_markup": {"inline_keyboard": [[{"text": "👀 Листать все", "callback_data": "show:0", "style": "success"}]]},
+        "reply_markup": {"inline_keyboard": [[{"text": t["more_btn"], "web_app": {"url": f"{WORKER_URL}/app"}}]]},
     })
 
 
@@ -704,6 +742,7 @@ def districts_map(offers):
 
 def main():
     users = get_users()
+    USER_LANG.update({str(u["id"]): u.get("lang", "ru") for u in users})
     print(f"Подписчиков: {len(users)}")
 
     seen = {}
