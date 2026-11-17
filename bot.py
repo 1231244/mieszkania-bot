@@ -46,6 +46,9 @@ def otodom_url(rooms, max_price):
 SEEN_FILE = "seen.json"
 SNAPSHOT_FILE = "latest.json"   # все актуальные объявления — бот берёт их для «Показать сейчас»
 SNAPSHOT_PRICE = 6000           # для снимка берём квартиры до этой цены
+PRICES_FILE = "prices.json"     # история цен: {ссылка: {"h": [[дата, цена], …], "seen": дата}}
+DROP_MIN_ZL = 50                # снижение считается, если минимум на 50 zł …
+DROP_MIN_PCT = 3                # … или минимум на 3%
 INFO_FILE = "adinfo.json"       # что бот узнал, открыв объявление: {ссылка: {pets, photo}}
 OLD_PETS_FILE = "pets.json"
 PETS_PER_RUN = 400              # сколько старых объявлений открывать за раз (новые — всегда)
@@ -124,7 +127,15 @@ def card(o, is_new):
     e = html.escape
     lines = []
     ago = ago_text(minutes_ago(o.get("posted_at")))
-    if is_new:
+    if is_new == "drop":
+        old, new = o["drop"]["from"], o["price_num"]
+        head = f"📉 <b>Цена снижена</b> · {money(old)} → {money(new)} (−{round((old - new) / old * 100)}%)"
+        if o.get("is_fav"):
+            head += " · ⭐ из избранного"
+        elif o.get("search_name"):
+            head += f" · 🔎 {e(o['search_name'])}"
+        lines += [head, ""]
+    elif is_new:
         head = "🔥 <b>Новое</b>" + (f" · {ago}" if ago else "")
         if o.get("search_name"):
             head += f" · 🔎 {e(o['search_name'])}"
@@ -149,6 +160,8 @@ def card(o, is_new):
     else:
         lines.append(f"💳 {e(o['price'])}")
     lines.append(f"🔐 Кауция: {money(o['kaucja'])}" if o.get("kaucja") else "🔐 Кауция: не указана")
+    if o.get("drop") and is_new != "drop":
+        lines.append(f"📉 Цена снижена, было {money(o['drop']['from'])}")
 
     # 3. Плюсы и минусы — только если есть что сказать
     deal = o.get("deal")
@@ -179,8 +192,8 @@ def card_buttons(o):
     ]}
 
 
-def send_offer(chat_id, o):
-    caption = card(o, is_new=True)
+def send_offer(chat_id, o, kind=True):
+    caption = card(o, is_new=kind)
     buttons = card_buttons(o)
     if o.get("photo"):
         if tg(chat_id, "sendPhoto", {"photo": o["photo"], "caption": caption,
@@ -733,6 +746,36 @@ def main():
     with open(INFO_FILE, "w", encoding="utf-8") as f:
         json.dump(dict(list(info.items())[-3000:]), f, ensure_ascii=False)
 
+    # 3.5) История цен: запоминаем цену аренды, ищем снижения
+    prices = {}
+    if os.path.exists(PRICES_FILE):
+        with open(PRICES_FILE, encoding="utf-8") as f:
+            prices = json.load(f)
+    first_prices = not prices
+    now_iso = datetime.now(WARSAW).isoformat(timespec="minutes")
+    drops = {}   # ссылка → объявление, у которого только что снизилась цена
+    for _, _, offers in fetched:
+        for o in offers:
+            p = o.get("price_num")
+            if not p:
+                continue
+            rec = prices.setdefault(o["url"], {"h": [[now_iso, p]], "seen": now_iso})
+            rec["seen"] = now_iso
+            last = rec["h"][-1][1]
+            if p != last:
+                rec["h"] = (rec["h"] + [[now_iso, p]])[-10:]
+                if p < last and (last - p >= DROP_MIN_ZL or (last - p) / last * 100 >= DROP_MIN_PCT) \
+                        and not first_prices:
+                    drops[o["url"]] = o
+            h = rec["h"]
+            if len(h) >= 2 and h[-1][1] < h[-2][1] and (minutes_ago(h[-1][0]) or 0) < 14 * 24 * 60:
+                o["drop"] = {"from": h[-2][1], "at": h[-1][0]}
+    # забываем объявления, которых не видно больше 30 дней
+    prices = {u: r for u, r in prices.items() if (minutes_ago(r["seen"]) or 0) < 30 * 24 * 60}
+    with open(PRICES_FILE, "w", encoding="utf-8") as f:
+        json.dump(prices, f, ensure_ascii=False)
+    print(f"Цены: отслеживаю {len(prices)}, снижений сейчас {len(drops)}")
+
     # 4) Новые объявления → подписчикам по их фильтрам
     to_send = {u["id"]: [] for u in users}
     for key, rooms, offers in fetched:
@@ -760,6 +803,21 @@ def main():
         if len(offers) > MAX_PER_RUN:
             send_more(uid, len(offers) - MAX_PER_RUN)
         print(f"Пользователю {uid}: отправлено {min(len(offers), MAX_PER_RUN)} из {len(offers)}")
+
+    # 4.5) Снижение цены → тем, кому квартира подходит, и тем, у кого она в избранном
+    drop_send = {}
+    for url, o in drops.items():
+        rooms = o.get("rooms")
+        for u in users:
+            fav = url in (u.get("favs") or [])
+            if fav or user_matches(u, o, rooms):
+                lst = drop_send.setdefault(u["id"], [])
+                if all(x["url"] != url for x in lst):
+                    lst.append(dict(o, search_name="" if fav else u.get("search", ""), is_fav=fav))
+    for uid, offers in drop_send.items():
+        for o in offers[:MAX_PER_RUN]:
+            send_offer(uid, o, kind="drop")
+        print(f"Пользователю {uid}: снижений цены {len(offers)}")
 
     seen["_sigs"] = list(sigs)[-1000:]
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
