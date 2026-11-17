@@ -64,12 +64,31 @@ def is_quiet():
     return h >= QUIET_FROM or h < QUIET_TO
 
 
-def tg(chat_id, method, payload):
-    data = {"chat_id": chat_id, "disable_notification": is_quiet(), **payload}
-    r = requests.post(f"{API}/{method}", json=data, timeout=30)
-    if not r.ok:
-        print(f"Telegram НЕ отправил ({method}) для {chat_id}: {r.status_code} {r.text}")
-    return r.ok
+ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()   # твой Telegram ID: сюда приходят сигналы о поломках
+
+
+def tg(chat_id, method, payload, quiet=None):
+    """Отправка с очередью: не больше ~25 сообщений в секунду; если Telegram просит подождать — ждём."""
+    data = {"chat_id": chat_id, "disable_notification": is_quiet() if quiet is None else quiet, **payload}
+    for attempt in range(3):
+        r = requests.post(f"{API}/{method}", json=data, timeout=30)
+        time.sleep(0.04)
+        if r.status_code == 429:   # «слишком много сообщений» — Telegram говорит, сколько ждать
+            wait = (r.json().get("parameters") or {}).get("retry_after", 3)
+            print(f"Telegram просит подождать {wait} с")
+            time.sleep(wait + 1)
+            continue
+        if not r.ok:
+            print(f"Telegram НЕ отправил ({method}) для {chat_id}: {r.status_code} {r.text[:200]}")
+        return r.ok
+    return False
+
+
+def alert(text):
+    """Сигнал владельцу бота."""
+    print(f"СИГНАЛ: {text}")
+    if ADMIN_ID:
+        tg(ADMIN_ID, "sendMessage", {"text": text, "parse_mode": "HTML"}, quiet=False)
 
 
 PETS_TEXT = {"yes": "🐾 Можно с животными", "no": "🚫 Без животных", "unknown": "❔ Животные: не указано"}
@@ -651,6 +670,19 @@ def main():
             print(f"{key}: найдено {len(offers)}")
             fetched.append((key, rooms, offers))
 
+    # Проверка здоровья: если сайт 3 раза подряд ничего не отдал — пишем владельцу
+    health = seen.get("_health", {})
+    for name in SOURCES:
+        got = sum(len(offs) for k, r, offs in fetched if k.startswith(name + ":"))
+        fails = 0 if got else health.get(name, 0) + 1
+        if fails == 3:
+            alert(f"⚠️ <b>{name}</b>: 3 проверки подряд (~45 мин) — 0 объявлений.\n"
+                  f"Возможно, сайт изменился или заблокировал бота. Открой лог в GitHub Actions.")
+        if fails == 0 and health.get(name, 0) >= 3:
+            alert(f"✅ <b>{name}</b> снова работает.")
+        health[name] = fails
+    seen["_health"] = health
+
     # 2) Средняя цена за м² по каждому количеству комнат
     avg = {}
     for rooms in [1, 2, 3, 4]:
@@ -747,4 +779,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        alert(f"❌ <b>Бот упал</b> при проверке квартир:\n<code>{html.escape(str(e))[:300]}</code>\n"
+              f"Подробности — в логе GitHub Actions.")
+        raise
