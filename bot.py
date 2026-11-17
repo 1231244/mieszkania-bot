@@ -123,75 +123,59 @@ def ago_text(mins):
 
 
 def card(o, is_new):
-    """Компактная карточка квартиры (одинаковая для уведомлений и «Показать сейчас»)."""
+    """Короткая карточка: цена, что и где, главное — и две кнопки."""
     e = html.escape
     lines = []
     ago = ago_text(minutes_ago(o.get("posted_at")))
+    tag = f" · 🔎 {e(o['search_name'])}" if o.get("search_name") else ""
     if is_new == "drop":
-        old, new = o["drop"]["from"], o["price_num"]
-        head = f"📉 <b>Цена снижена</b> · {money(old)} → {money(new)} (−{round((old - new) / old * 100)}%)"
-        if o.get("is_fav"):
-            head += " · ⭐ из избранного"
-        elif o.get("search_name"):
-            head += f" · 🔎 {e(o['search_name'])}"
-        lines += [head, ""]
+        cz = o.get("czynsz") or 0   # показываем так же, как цену ниже: вместе с оплатами
+        old, new = o["drop"]["from"] + cz, o["price_num"] + cz
+        lines += [f"📉 <b>Цена снизилась</b>" + (" · ⭐ из избранного" if o.get("is_fav") else tag),
+                  f"было {money(old)} → стало {money(new)}", ""]
     elif is_new:
-        head = "🔥 <b>Новое</b>" + (f" · {ago}" if ago else "")
-        if o.get("search_name"):
-            head += f" · 🔎 {e(o['search_name'])}"
-        lines += [head, ""]
+        lines += ["🔥 <b>Новая квартира</b>" + (f" · {ago}" if ago else "") + tag, ""]
 
-    # 1. Что и где
+    rent = o.get("price_num")
+    if rent:
+        lines.append(f"💳 <b>{money(rent + (o.get('czynsz') or 0))} в месяц</b>")
+    else:
+        lines.append(f"💳 {e(o['price'])}")
     head = [ROOM_WORDS.get(o.get("rooms"), "")]
     if o.get("area_num"):
         head.append(f"{o['area_num']:g} м²")
-    lines.append("🏠 <b>" + " · ".join(x for x in head if x) + "</b>")
+    lines.append("🏠 " + " · ".join(x for x in head if x))
     if o.get("district_short"):
         lines.append(f"📍 {e(o['district_short'])}")
 
-    # 2. Деньги: сколько платить в месяц и кауция
-    rent = o.get("price_num")
-    if rent:
-        if o.get("czynsz"):
-            lines.append(f"💳 <b>{money(rent + o['czynsz'])}/мес</b>")
-            lines.append(f"     {money(rent)} аренда + {money(o['czynsz'])} оплаты")
-        else:
-            lines.append(f"💳 <b>{money(rent)}/мес</b> · оплаты не указаны")
-    else:
-        lines.append(f"💳 {e(o['price'])}")
-    lines.append(f"🔐 Кауция: {money(o['kaucja'])}" if o.get("kaucja") else "🔐 Кауция: не указана")
-    if o.get("price_hist") and len(o["price_hist"]) >= 2:
-        lines.append("📈 Цены: " + " → ".join(f"{p:,}".replace(",", " ") for p in o["price_hist"]) + " zł")
-    elif o.get("drop") and is_new != "drop":
-        lines.append(f"📉 Цена снижена, было {money(o['drop']['from'])}")
+    extra = []
+    if rent and o.get("czynsz"):
+        extra.append(f"аренда {money(rent)} + оплаты {money(o['czynsz'])}")
+    if o.get("kaucja"):
+        extra.append(f"кауция {money(o['kaucja'])}")
+    if extra:
+        lines.append("<i>" + " · ".join(extra) + "</i>")
 
-    # 3. Плюсы и минусы — только если есть что сказать
+    plus = []
     deal = o.get("deal")
     if deal is not None and deal <= -5:
-        lines.append(f"💚 На {abs(deal)}% дешевле рынка")
-    elif deal is not None and deal >= 10:
-        lines.append(f"🔺 На {deal}% дороже рынка")
-    if o.get("pets") in ("yes", "no"):
-        lines.append(PETS_TEXT[o["pets"]])
-
-    # 4. Заголовок хозяина и источник
-    lines += ["", f"<i>{e(o['title'][:80])}</i>"]
-    tail = f"{o['source']} · частник"
+        plus.append("💚 дешевле рынка")
+    if o.get("pets") == "yes":
+        plus.append("🐾 можно с животными")
+    elif o.get("pets") == "no":
+        plus.append("🚫 без животных")
+    if plus:
+        lines.append(" · ".join(plus))
     if not is_new and ago:
-        tail += f" · {ago}"
-    lines.append(f"<i>{tail}</i>")
+        lines.append(f"<i>{ago}</i>")
     return "\n".join(lines)
 
 
 def card_buttons(o):
-    second = [{"text": "⭐ В избранное", "callback_data": "fav"}]
-    if o.get("district_short"):
-        q = requests.utils.quote(f"{o['district_short']}, Wrocław")
-        second.append({"text": "🗺 Карта", "url": f"https://www.google.com/maps/search/?api=1&query={q}"})
-    return {"inline_keyboard": [
-        [{"text": "🔗 Открыть объявление", "url": o["url"]}],
-        second,
-    ]}
+    return {"inline_keyboard": [[
+        {"text": "🔗 Открыть", "url": o["url"]},
+        {"text": "⭐ Сохранить", "callback_data": "fav"},
+    ]]}
 
 
 SENT_LOG = {}   # что и кому отправили за этот запуск — уходит в «📜 Историю» пользователя
