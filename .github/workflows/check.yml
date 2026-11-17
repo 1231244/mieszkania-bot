@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main   # всегда свежая версия (важно, если запуск ждал в очереди)
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -33,4 +35,4 @@ jobs:
           git config user.name "bot"
           git config user.email "bot@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || (git commit -m "update seen" && git push)
+          git diff --cached --quiet || (git commit -m "update seen" && (git push || (git pull --rebase -X theirs && git push)))
