@@ -281,6 +281,31 @@ def price_number(text):
     return int(digits) if digits else None
 
 
+def find_coords(node, depth=0):
+    """Ищет в данных сайта координаты (широта/долгота) в районе Вроцлава."""
+    if depth > 6:
+        return None
+    if isinstance(node, dict):
+        for a, b in (("latitude", "longitude"), ("lat", "lon"), ("lat", "lng")):
+            la, lo = node.get(a), node.get(b)
+            try:
+                la, lo = float(la), float(lo)
+            except (TypeError, ValueError):
+                continue
+            if 50.9 < la < 51.3 and 16.7 < lo < 17.3:
+                return round(la, 5), round(lo, 5)
+        for v in node.values():
+            c = find_coords(v, depth + 1)
+            if c:
+                return c
+    elif isinstance(node, list):
+        for v in node[:5]:
+            c = find_coords(v, depth + 1)
+            if c:
+                return c
+    return None
+
+
 def olx_page_photos(page_html):
     """OLX прячет фото всех объявлений в данных страницы — достаём их оттуда сразу."""
     photos = {}
@@ -291,12 +316,18 @@ def olx_page_photos(page_html):
         state = json.loads(json.loads(m.group(1)))
         ads = (((state.get("listing") or {}).get("listing") or {}).get("ads")) or []
         for ad in ads:
+            if not ad.get("url"):
+                continue
+            key = ad["url"].split("?")[0].split("#")[0]
             pics = ad.get("photos") or []
-            if ad.get("url") and pics:
+            if pics:
                 first = pics[0] if isinstance(pics[0], str) else (pics[0].get("link") or "")
                 first = first.replace("{width}", "1000").replace("{height}", "750")
                 if first:
-                    photos[ad["url"].split("?")[0].split("#")[0]] = first
+                    photos[key] = first
+            c = find_coords(ad.get("map") or ad.get("location") or {})
+            if c:
+                photos[key + "#geo"] = c
     except (ValueError, AttributeError, TypeError) as e:
         print(f"OLX: не прочитались фото из данных страницы — {e}")
     return photos
@@ -347,6 +378,7 @@ def get_olx(rooms, max_price):
                 photo = ""
         if not photo:
             photo = page_photos.get(url, "")
+        geo = page_photos.get(url + "#geo")
         photo = re.sub(r";s=\d+x\d+", ";s=1000x750", photo)  # фото покрупнее
         # свежее = опубликовано сегодня и не «поднято» (Odświeżono)
         fresh = ("Dzisiaj" in loc) and ("Odświeżono" not in loc) and not featured
@@ -354,7 +386,7 @@ def get_olx(rooms, max_price):
                        "price_num": price_number(price),
                        "district": district, "when": when, "area": area,
                        "photo": photo, "url": url, "fresh": fresh, "featured": featured,
-                       "posted_at": posted_at})
+                       "posted_at": posted_at, "geo": geo})
     return offers
 
 
@@ -471,6 +503,7 @@ def get_otodom(rooms, max_price):
             "url": f"https://www.otodom.pl/pl/oferta/{ad['slug']}",
             "district": otodom_location(ad),
             "street": otodom_street(ad),
+            "geo": find_coords(ad.get("location") or {}),
             "area": f"{ad['areaInSquareMeters']} m²" if ad.get("areaInSquareMeters") else "",
             "when": otodom_when(ad),
             "posted_at": otodom_posted(ad),
@@ -523,6 +556,7 @@ def ad_page(url):
         try:
             ad = json.loads(script.string).get("props", {}).get("pageProps", {}).get("ad") or {}
             parts.append(BeautifulSoup(ad.get("description") or "", "html.parser").get_text(" "))
+            extras["geo"] = find_coords(ad.get("location") or {}) or find_coords(ad.get("map") or {})
             if str(ad.get("advertiserType", "")).lower() in ("agency", "developer"):
                 extras["agency"] = True
             target = ad.get("target") or {}
@@ -617,7 +651,8 @@ def check_ads(urls, info, need_photo, rents, limit=None):
         known = info.get(url)
         if known and known.get("v") == 3 and known.get("kaucja"):
             known["v"] = INFO_VERSION   # кауция уже найдена — открывать заново не нужно
-        if known and known.get("v") == INFO_VERSION and (known.get("photo") or url not in need_photo):
+        no_geo = "otodom" in url and "geo" not in (known or {})
+        if known and known.get("v") == INFO_VERSION and (known.get("photo") or url not in need_photo) and not no_geo:
             continue
         if limit is not None and checked >= limit:
             break
@@ -625,7 +660,8 @@ def check_ads(urls, info, need_photo, rents, limit=None):
             text, photo, extras = ad_page(url)
             czynsz, kaucja = costs_from_text(text, rents.get(url), extras)
             info[url] = {"v": INFO_VERSION, "pets": pets_from_text(text), "photo": photo or "none",
-                         "czynsz": czynsz, "kaucja": kaucja, "agency": bool(extras.get("agency"))}
+                         "czynsz": czynsz, "kaucja": kaucja, "agency": bool(extras.get("agency")),
+                         "geo": extras.get("geo")}
         except Exception as e:
             print(f"Не открылось {url} — {e}")
         checked += 1
@@ -768,6 +804,8 @@ def main():
                 o["total"] = o["price_num"] + (o["czynsz"] or 0)
             if not o.get("photo") and known.get("photo") not in (None, "", "none"):
                 o["photo"] = known["photo"]
+            if not o.get("geo") and known.get("geo"):
+                o["geo"] = known["geo"]
     with open(INFO_FILE, "w", encoding="utf-8") as f:
         json.dump(dict(list(info.items())[-3000:]), f, ensure_ascii=False)
 
