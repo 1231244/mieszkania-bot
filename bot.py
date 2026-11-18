@@ -25,26 +25,30 @@ ROOMS_OLX = {1: "one", 2: "two", 3: "three", 4: "four"}
 ROOMS_OTODOM = {1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR"}
 
 
-def olx_url(rooms, max_price):
+def olx_url(rooms, max_price, owner="private"):
+    # owner: private — частники, business — агентства
     return (
         "https://www.olx.pl/nieruchomosci/mieszkania/wynajem/wroclaw/"
         f"?search%5Bfilter_float_price:to%5D={max_price}"
         f"&search%5Bfilter_enum_rooms%5D%5B0%5D={ROOMS_OLX[rooms]}"
-        "&search%5Bprivate_business%5D=private"
+        f"&search%5Bprivate_business%5D={owner}"
         "&search%5Border%5D=created_at:desc"
     )
 
 
-def otodom_url(rooms, max_price):
+def otodom_url(rooms, max_price, owner="private"):
+    kind = "PRIVATE" if owner == "private" else "ALL"
     return (
         "https://www.otodom.pl/pl/wyniki/wynajem/mieszkanie/dolnoslaskie/wroclaw/wroclaw/wroclaw"
         f"?roomsNumber=%5B{ROOMS_OTODOM[rooms]}%5D&priceMax={max_price}"
-        "&ownerTypeSingleSelect=PRIVATE&by=LATEST&direction=DESC&limit=36"
+        f"&ownerTypeSingleSelect={kind}&by=LATEST&direction=DESC&limit=36"
     )
 
 
 SEEN_FILE = "seen.json"
 SNAPSHOT_FILE = "latest.json"   # все актуальные объявления — бот берёт их для «Показать сейчас»
+PHOTOS_FILE = "photos.json"     # галерея: {ссылка: [до 8 фото]} — приложение грузит её само
+MAX_PHOTOS = 8
 SNAPSHOT_PRICE = 6000           # для снимка берём квартиры до этой цены
 PRICES_FILE = "prices.json"     # история цен: {ссылка: {"h": [[дата, цена], …], "seen": дата}}
 DROP_MIN_ZL = 50                # снижение считается, если минимум на 50 zł …
@@ -108,24 +112,28 @@ T = {
            "cheap": "💚 дешевле рынка", "pets_yes": "🐾 можно с животными", "pets_no": "🚫 без животных",
            "open": "🔗 Открыть", "save": "⭐ Сохранить", "more": "📬 Ещё новых квартир по твоим фильтрам: <b>{n}</b>",
            "more_btn": "👀 Смотреть все в приложении", "rooms": {1: "1 комната", 2: "2 комнаты", 3: "3 комнаты", 4: "4+ комнаты"},
+           "agency": "🏢 агентство", "fee": "комиссия {a}", "nofee": "без комиссии",
            "m2": "м²", "min": "{n} мин назад", "h": "{n} ч назад", "d": "{n} дн назад"},
     "uk": {"new": "🔥 <b>Нова квартира</b>", "drop": "📉 <b>Ціна знизилась</b>", "fav": "⭐ з обраного",
            "was": "було {a} → стало {b}", "month": "на місяць", "fees": "оренда {a} + оплати {b}", "dep": "кауція {a}",
            "cheap": "💚 дешевше ринку", "pets_yes": "🐾 можна з тваринами", "pets_no": "🚫 без тварин",
            "open": "🔗 Відкрити", "save": "⭐ Зберегти", "more": "📬 Ще нових квартир за твоїми фільтрами: <b>{n}</b>",
            "more_btn": "👀 Дивитись усі в застосунку", "rooms": {1: "1 кімната", 2: "2 кімнати", 3: "3 кімнати", 4: "4+ кімнати"},
+           "agency": "🏢 агентство", "fee": "комісія {a}", "nofee": "без комісії",
            "m2": "м²", "min": "{n} хв тому", "h": "{n} год тому", "d": "{n} дн тому"},
     "pl": {"new": "🔥 <b>Nowe mieszkanie</b>", "drop": "📉 <b>Cena spadła</b>", "fav": "⭐ z ulubionych",
            "was": "było {a} → jest {b}", "month": "miesięcznie", "fees": "najem {a} + czynsz {b}", "dep": "kaucja {a}",
            "cheap": "💚 taniej niż rynek", "pets_yes": "🐾 można ze zwierzętami", "pets_no": "🚫 bez zwierząt",
            "open": "🔗 Otwórz", "save": "⭐ Zapisz", "more": "📬 Więcej nowych mieszkań według twoich filtrów: <b>{n}</b>",
            "more_btn": "👀 Zobacz wszystkie w aplikacji", "rooms": {1: "1 pokój", 2: "2 pokoje", 3: "3 pokoje", 4: "4+ pokoje"},
+           "agency": "🏢 biuro nieruchomości", "fee": "prowizja {a}", "nofee": "bez prowizji",
            "m2": "m²", "min": "{n} min temu", "h": "{n} godz. temu", "d": "{n} dni temu"},
     "en": {"new": "🔥 <b>New apartment</b>", "drop": "📉 <b>Price dropped</b>", "fav": "⭐ from saved",
            "was": "was {a} → now {b}", "month": "per month", "fees": "rent {a} + fees {b}", "dep": "deposit {a}",
            "cheap": "💚 below market", "pets_yes": "🐾 pets allowed", "pets_no": "🚫 no pets",
            "open": "🔗 Open", "save": "⭐ Save", "more": "📬 More new apartments matching your filters: <b>{n}</b>",
            "more_btn": "👀 See all in the app", "rooms": {1: "1 room", 2: "2 rooms", 3: "3 rooms", 4: "4+ rooms"},
+           "agency": "🏢 agency", "fee": "agency fee {a}", "nofee": "no agency fee",
            "m2": "m²", "min": "{n} min ago", "h": "{n} h ago", "d": "{n} days ago"},
 }
 USER_LANG = {}   # id → язык, заполняется из /users
@@ -188,10 +196,14 @@ def card(o, is_new, t=None):
         extra.append(t["fees"].format(a=money(rent), b=money(o["czynsz"])))
     if o.get("kaucja"):
         extra.append(t["dep"].format(a=money(o["kaucja"])))
+    if o.get("agency"):   # у агентств часто есть комиссия — показываем её отдельно
+        fee = o.get("prowizja")
+        extra.append(t["nofee"] if fee == 0 else t["fee"].format(a=money(fee)) if fee else "")
+    extra = [x for x in extra if x]
     if extra:
         lines.append("<i>" + " · ".join(extra) + "</i>")
 
-    plus = []
+    plus = [t["agency"]] if o.get("agency") else []
     deal = o.get("deal")
     if deal is not None and deal <= -5:
         plus.append(t["cheap"])
@@ -342,11 +354,15 @@ def olx_page_photos(page_html):
                 continue
             key = ad["url"].split("?")[0].split("#")[0]
             pics = ad.get("photos") or []
-            if pics:
-                first = pics[0] if isinstance(pics[0], str) else (pics[0].get("link") or "")
-                first = first.replace("{width}", "1000").replace("{height}", "750")
-                if first:
-                    photos[key] = first
+            links = []
+            for p in pics[:MAX_PHOTOS]:
+                link = p if isinstance(p, str) else (p.get("link") or "")
+                link = link.replace("{width}", "1000").replace("{height}", "750")
+                if link:
+                    links.append(link)
+            if links:
+                photos[key] = links[0]
+                photos[key + "#all"] = links
             c = find_coords(ad.get("map") or ad.get("location") or {})
             if c:
                 photos[key + "#geo"] = c
@@ -355,8 +371,8 @@ def olx_page_photos(page_html):
     return photos
 
 
-def get_olx(rooms, max_price):
-    r = requests.get(olx_url(rooms, max_price), headers=HEADERS, timeout=30)
+def get_olx(rooms, max_price, owner="private"):
+    r = requests.get(olx_url(rooms, max_price, owner), headers=HEADERS, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     page_photos = olx_page_photos(r.text)
@@ -407,8 +423,9 @@ def get_olx(rooms, max_price):
         offers.append({"id": ad_id, "title": title, "price": price, "loc": loc,
                        "price_num": price_number(price),
                        "district": district, "when": when, "area": area,
-                       "photo": photo, "url": url, "fresh": fresh, "featured": featured,
-                       "posted_at": posted_at, "geo": geo})
+                       "photo": photo, "photos": page_photos.get(url + "#all") or ([photo] if photo else []),
+                       "url": url, "fresh": fresh, "featured": featured,
+                       "posted_at": posted_at, "geo": geo, "agency": owner == "business"})
     return offers
 
 
@@ -469,13 +486,20 @@ def otodom_street(ad):
     return f"{name} {street.get('number') or ''}".strip()
 
 
+def otodom_photos(ad):
+    out = []
+    for img in (ad.get("images") or [])[:MAX_PHOTOS]:
+        if isinstance(img, dict):
+            for key in ("large", "medium", "small"):
+                if img.get(key):
+                    out.append(img[key])
+                    break
+    return out
+
+
 def otodom_photo(ad):
-    imgs = ad.get("images") or []
-    if imgs and isinstance(imgs[0], dict):
-        for key in ("large", "medium", "small"):
-            if imgs[0].get(key):
-                return imgs[0][key]
-    return ""
+    p = otodom_photos(ad)
+    return p[0] if p else ""
 
 
 def otodom_posted(ad):
@@ -504,8 +528,8 @@ def otodom_when(ad):
         return ""
 
 
-def get_otodom(rooms, max_price):
-    r = requests.get(otodom_url(rooms, max_price), headers=HEADERS, timeout=30)
+def get_otodom(rooms, max_price, owner="private"):
+    r = requests.get(otodom_url(rooms, max_price, owner), headers=HEADERS, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     script = soup.find("script", id="__NEXT_DATA__")
@@ -514,8 +538,9 @@ def get_otodom(rooms, max_price):
     ads = find_ads(json.loads(script.string)) or []
     offers = []
     for ad in ads:
-        if ad.get("isPrivateOwner") is False or (isinstance(ad.get("agency"), dict) and ad["agency"].get("name")):
-            continue   # агентство — пропускаем
+        is_agency = ad.get("isPrivateOwner") is False or (isinstance(ad.get("agency"), dict) and bool(ad["agency"].get("name")))
+        if is_agency != (owner == "business"):
+            continue   # в ленте частников — только частники, в ленте агентств — только агентства
         offers.append({
             "id": str(ad["id"]),
             "title": ad.get("title", "Объявление"),
@@ -530,12 +555,21 @@ def get_otodom(rooms, max_price):
             "when": otodom_when(ad),
             "posted_at": otodom_posted(ad),
             "photo": otodom_photo(ad),
+            "photos": otodom_photos(ad),
             "fresh": otodom_fresh(ad),
+            "agency": is_agency,
         })
     return offers
 
 
-SOURCES = {"OLX": get_olx, "Otodom": get_otodom}
+# Четыре ленты: частники и агентства на каждом сайте
+SOURCES = {
+    "OLX": get_olx,
+    "Otodom": get_otodom,
+    "OLX-agency": lambda rooms, max_price: get_olx(rooms, max_price, "business"),
+    "Otodom-agency": lambda rooms, max_price: get_otodom(rooms, max_price, "business"),
+}
+SOURCE_NAME = {"OLX-agency": "OLX", "Otodom-agency": "Otodom"}   # как подписывать в карточке
 
 
 # ---------- ГЛАВНОЕ ----------
@@ -620,6 +654,10 @@ CZYNSZ_PATTERNS = [
     r"\+\s*czynsz\s*[:\-–]?\s*(?:ok\.?\s*)?" + NUM,
     r"\+\s*" + NUM + r"\s*(?:czynsz|opłat)",
 ]
+PROWIZJA_PATTERNS = [
+    r"prowizj\w*[^0-9\n]{0,35}?" + NUM,
+    r"wynagrodzeni\w* (?:agencji|biura|pośrednika)[^0-9\n]{0,30}?" + NUM,
+]
 KAUCJA_PATTERNS = [
     r"kaucj\w*[^0-9\n]{0,35}?" + NUM,
     r"depozyt\w*[^0-9\n]{0,25}?" + NUM,
@@ -655,6 +693,22 @@ def costs_from_text(text, rent, extras):
     return czynsz, kaucja
 
 
+def prowizja_from_text(text, rent):
+    """Комиссия агентства: число, 0 если «bez prowizji», None если не нашли."""
+    if re.search(r"bez prowizji|0\s*%\s*prowizji|prowizj\w*\s*[:\-–]?\s*(?:0|brak|nie ma)\b", text):
+        return 0
+    for p in PROWIZJA_PATTERNS:
+        m = re.search(p, text)
+        if m:
+            n = to_int(m.group(1))
+            if n and 200 <= n <= 30000:
+                return n
+    m = re.search(r"prowizj\w*[^.\n]{0,40}?(\d{2,3})\s*%", text)
+    if m and rent:
+        return round(rent * int(m.group(1)) / 100)
+    return None
+
+
 def pets_from_text(text):
     if any(re.search(p, text) for p in PETS_NO):
         return "no"
@@ -683,6 +737,7 @@ def check_ads(urls, info, need_photo, rents, limit=None):
             czynsz, kaucja = costs_from_text(text, rents.get(url), extras)
             info[url] = {"v": INFO_VERSION, "pets": pets_from_text(text), "photo": photo or "none",
                          "czynsz": czynsz, "kaucja": kaucja, "agency": bool(extras.get("agency")),
+                         "prowizja": prowizja_from_text(text + " " + extras.get("full", ""), rents.get(url)),
                          "geo": extras.get("geo")}
         except Exception as e:
             print(f"Не открылось {url} — {e}")
@@ -719,6 +774,11 @@ def user_matches(u, o, rooms):
     if u.get("maxArea") and o["area_num"] > u["maxArea"]:
         return False
     if u.get("hideNoPets") and o.get("pets") == "no":
+        return False
+    owner = u.get("owner") or "private"   # private — только частники, agency — только агентства, all — все
+    if owner == "private" and o.get("agency"):
+        return False
+    if owner == "agency" and not o.get("agency"):
         return False
     if u.get("districts"):
         hay = norm(f"{o.get('district_short', '')} {o.get('title', '')}")
@@ -765,7 +825,7 @@ def main():
             except Exception as e:
                 print(f"{key}: ошибка — {e}")
                 continue
-            offers = [enrich(o, rooms, name) for o in offers if not o.get("featured")]
+            offers = [enrich(o, rooms, SOURCE_NAME.get(name, name)) for o in offers if not o.get("featured")]
             offers = [o for o in offers if not is_single_room(o)]   # только целые квартиры
             print(f"{key}: найдено {len(offers)}")
             fetched.append((key, rooms, offers))
@@ -820,7 +880,9 @@ def main():
         for o in offers:
             known = info.get(o["url"]) or {}
             o["pets"] = known.get("pets", "unknown")
-            o["agency"] = known.get("agency", False)
+            o["agency"] = bool(o.get("agency") or known.get("agency"))
+            if o["agency"]:
+                o["prowizja"] = known.get("prowizja")
             o["czynsz"] = known.get("czynsz")
             o["kaucja"] = known.get("kaucja")
             if o.get("price_num"):
@@ -875,7 +937,7 @@ def main():
         new = [o for o in offers if o["id"] not in old]
         if not first_run:
             for o in new:
-                if not o.get("fresh", True) or o["sig"] in sigs or o.get("agency"):
+                if not o.get("fresh", True) or o["sig"] in sigs:
                     continue
                 sigs.add(o["sig"])
                 for u in users:   # u = один поиск человека (у человека может быть до 5)
@@ -923,13 +985,28 @@ def main():
         for i in range(max((len(x) for x in lists), default=0)):
             for lst in lists:
                 if i < len(lst) and lst[i]["sig"] not in snap_sigs and lst[i].get("price_num") \
-                        and not lst[i].get("agency") \
                         and (minutes_ago(lst[i].get("posted_at")) or 0) < 60 * 24 * 60:
                     snap_sigs.add(lst[i]["sig"])
                     snapshot.append(lst[i])
+    # галерея отдельным файлом, чтобы снимок оставался лёгким
+    gallery = {o["url"]: o["photos"] for o in snapshot if len(o.get("photos") or []) > 1}
+    with open(PHOTOS_FILE, "w", encoding="utf-8") as f:
+        json.dump(gallery, f, ensure_ascii=False, separators=(",", ":"))
+    keep = ("id", "url", "title", "price", "price_num", "total", "czynsz", "kaucja", "prowizja", "rooms",
+            "area_num", "ppm", "deal", "district_short", "pets", "agency", "photo", "posted_at",
+            "price_hist", "source", "geo")
+    slim = []
+    for o in snapshot:
+        x = {k: o[k] for k in keep if o.get(k) not in (None, "", [])}
+        x["title"] = (x.get("title") or "")[:120]
+        x["n_photos"] = len(o.get("photos") or []) or (1 if o.get("photo") else 0)
+        slim.append(x)
     with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
         json.dump({"updated": datetime.now(WARSAW).isoformat(), "avg": avg,
-                   "districts": districts_map(snapshot), "offers": snapshot}, f, ensure_ascii=False)
+                   "districts": districts_map(snapshot), "offers": slim}, f, ensure_ascii=False,
+                  separators=(",", ":"))
+    print(f"Снимок: {len(slim)} квартир (агентств {sum(1 for o in slim if o.get('agency'))}), "
+          f"галерей {len(gallery)}")
 
 
 if __name__ == "__main__":
